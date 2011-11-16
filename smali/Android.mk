@@ -37,6 +37,9 @@ GEN := $(addprefix $(intermediates)/, \
 
 ANTLR_JAR = $(call java-lib-deps,antlr,true)
 
+$(intermediates)/smaliTreeWalker.java: $(intermediates)/smaliParser.java $(intermediates)/smaliLexer.java
+$(intermediates)/smaliParser.java: $(intermediates)/smaliLexer.java
+
 $(GEN): $(ANTLR_JAR)
 $(GEN): PRIVATE_PATH := $(LOCAL_PATH)
 $(GEN): PRIVATE_CUSTOM_TOOL = java -jar $(ANTLR_JAR) -fo $(dir $@) $<
