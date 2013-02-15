@@ -35,7 +35,7 @@ prog="${progdir}"/`basename "${prog}"`
 cd "${oldwd}"
 
 
-jarfile=baksmali.jar
+jarfile=baksmalilib.jar
 libdir="$progdir"
 
 if [ ! -r "$libdir/$jarfile" ]; then
