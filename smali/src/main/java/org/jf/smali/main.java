@@ -32,19 +32,16 @@ import org.antlr.runtime.*;
 import org.antlr.runtime.tree.CommonTree;
 import org.antlr.runtime.tree.CommonTreeNodeStream;
 import org.apache.commons.cli.*;
+import org.jf.dexlib.Code.Opcode;
 import org.jf.dexlib.CodeItem;
 import org.jf.dexlib.DexFile;
 import org.jf.dexlib.Util.ByteArrayAnnotatedOutput;
 import org.jf.util.ConsoleUtil;
-import org.jf.util.smaliHelpFormatter;
+import org.jf.util.SmaliHelpFormatter;
 
 import java.io.*;
-import java.nio.CharBuffer;
-import java.nio.MappedByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.charset.Charset;
-import java.nio.charset.CharsetDecoder;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
 
@@ -88,6 +85,9 @@ public class main {
      * Run!
      */
     public static void main(String[] args) {
+        Locale locale = new Locale("en", "US");
+        Locale.setDefault(locale);
+
         CommandLineParser parser = new PosixParser();
         CommandLine commandLine;
 
@@ -100,11 +100,13 @@ public class main {
 
         boolean allowOdex = false;
         boolean sort = false;
-        boolean fixStringConst = true;
+        boolean jumboInstructions = false;
         boolean fixGoto = true;
         boolean verboseErrors = false;
-        boolean oldLexer = false;
         boolean printTokens = false;
+
+        boolean apiSet = false;
+        int apiLevel = 14;
 
         String outputDexFile = "out.dex";
         String dumpFileName = null;
@@ -136,23 +138,24 @@ public class main {
                 case 'x':
                     allowOdex = true;
                     break;
+                case 'a':
+                    apiLevel = Integer.parseInt(commandLine.getOptionValue("a"));
+                    apiSet = true;
+                    break;
                 case 'D':
                     dumpFileName = commandLine.getOptionValue("D", outputDexFile + ".dump");
                     break;
                 case 'S':
                     sort = true;
                     break;
-                case 'C':
-                    fixStringConst = false;
+                case 'J':
+                    jumboInstructions = true;
                     break;
                 case 'G':
                     fixGoto = false;
                     break;
                 case 'V':
                     verboseErrors = true;
-                    break;
-                case 'L':
-                    oldLexer = true;
                     break;
                 case 'T':
                     printTokens = true;
@@ -184,12 +187,18 @@ public class main {
                     }
             }
 
+            Opcode.updateMapsForApiLevel(apiLevel, jumboInstructions);
+
             DexFile dexFile = new DexFile();
+
+            if (apiSet && apiLevel >= 14) {
+                dexFile.HeaderItem.setVersion(36);
+            }
 
             boolean errors = false;
 
             for (File file: filesToProcess) {
-                if (!assembleSmaliFile(file, dexFile, verboseErrors, oldLexer, printTokens, allowOdex)) {
+                if (!assembleSmaliFile(file, dexFile, verboseErrors, printTokens, allowOdex, apiLevel)) {
                     errors = true;
                 }
             }
@@ -203,8 +212,8 @@ public class main {
                 dexFile.setSortAllItems(true);
             }
 
-            if (fixStringConst || fixGoto) {
-                fixInstructions(dexFile, fixStringConst, fixGoto);
+            if (fixGoto) {
+                fixInstructions(dexFile, true, fixGoto);
             }
 
             dexFile.place();
@@ -255,18 +264,16 @@ public class main {
         }
     }
 
-    private static void fixInstructions(DexFile dexFile, boolean fixStringConst, boolean fixGoto) {
+    private static void fixInstructions(DexFile dexFile, boolean fixJumbo, boolean fixGoto) {
         dexFile.place();
 
-        byte[] newInsns = null;
-
         for (CodeItem codeItem: dexFile.CodeItemsSection.getItems()) {
-            codeItem.fixInstructions(fixStringConst, fixGoto);
+            codeItem.fixInstructions(fixJumbo, fixGoto);
         }
     }
 
-    private static boolean assembleSmaliFile(File smaliFile, DexFile dexFile, boolean verboseErrors, boolean oldLexer,
-                                             boolean printTokens, boolean allowOdex)
+    private static boolean assembleSmaliFile(File smaliFile, DexFile dexFile, boolean verboseErrors,
+                                             boolean printTokens, boolean allowOdex, int apiLevel)
             throws Exception {
         CommonTokenStream tokens;
 
@@ -274,27 +281,19 @@ public class main {
         boolean lexerErrors = false;
         LexerErrorInterface lexer;
 
-        if (oldLexer) {
-            ANTLRFileStream input = new ANTLRFileStream(smaliFile.getAbsolutePath(), "UTF-8");
-            input.name = smaliFile.getAbsolutePath();
+        FileInputStream fis = new FileInputStream(smaliFile.getAbsolutePath());
+        InputStreamReader reader = new InputStreamReader(fis, "UTF-8");
 
-            lexer = new smaliLexer(input);
-            tokens = new CommonTokenStream((TokenSource)lexer);
-        } else {
-            FileInputStream fis = new FileInputStream(smaliFile.getAbsolutePath());
-            InputStreamReader reader = new InputStreamReader(fis, "UTF-8");
-
-            lexer = new smaliFlexLexer(reader);
-            ((smaliFlexLexer)lexer).setSourceFile(smaliFile);
-            tokens = new CommonTokenStream((TokenSource)lexer);
-        }
+        lexer = new smaliFlexLexer(reader);
+        ((smaliFlexLexer)lexer).setSourceFile(smaliFile);
+        tokens = new CommonTokenStream((TokenSource)lexer);
 
         if (printTokens) {
             tokens.getTokens();
             
             for (int i=0; i<tokens.size(); i++) {
                 Token token = tokens.get(i);
-                if (token.getChannel() == smaliLexer.HIDDEN) {
+                if (token.getChannel() == smaliParser.HIDDEN) {
                     continue;
                 }
 
@@ -305,6 +304,7 @@ public class main {
         smaliParser parser = new smaliParser(tokens);
         parser.setVerboseErrors(verboseErrors);
         parser.setAllowOdex(allowOdex);
+        parser.setApiLevel(apiLevel);
 
         smaliParser.smali_file_return result = parser.smali_file();
 
@@ -318,7 +318,7 @@ public class main {
         treeStream.setTokenStream(tokens);
 
         smaliTreeWalker dexGen = new smaliTreeWalker(treeStream);
-
+        dexGen.setVerboseErrors(verboseErrors);
         dexGen.dexFile = dexFile;
         dexGen.smali_file();
 
@@ -334,20 +334,17 @@ public class main {
      * Prints the usage message.
      */
     private static void usage(boolean printDebugOptions) {
-        smaliHelpFormatter formatter = new smaliHelpFormatter();
-        formatter.setWidth(ConsoleUtil.getConsoleWidth());
+        SmaliHelpFormatter formatter = new SmaliHelpFormatter();
+
+        int consoleWidth = ConsoleUtil.getConsoleWidth();
+        if (consoleWidth <= 0) {
+            consoleWidth = 80;
+        }
+
+        formatter.setWidth(consoleWidth);
 
         formatter.printHelp("java -jar smali.jar [options] [--] [<smali-file>|folder]*",
-                "assembles a set of smali files into a dex file", basicOptions, "");
-
-        if (printDebugOptions) {
-            System.out.println();
-            System.out.println("Debug Options:");
-
-            StringBuffer sb = new StringBuffer();
-            formatter.renderOptions(sb, debugOptions);
-            System.out.println(sb.toString());
-        }
+                "assembles a set of smali files into a dex file", basicOptions, printDebugOptions?debugOptions:null);
     }
 
     private static void usage() {
@@ -385,6 +382,13 @@ public class main {
                         " cause dalvik to reject the class")
                 .create("x");
 
+        Option apiLevelOption = OptionBuilder.withLongOpt("api-level")
+                .withDescription("The numeric api-level of the file to generate, e.g. 14 for ICS. If not " +
+                        "specified, it defaults to 14 (ICS).")
+                .hasArg()
+                .withArgName("API_LEVEL")
+                .create("a");
+
         Option dumpOption = OptionBuilder.withLongOpt("dump-to")
                 .withDescription("additionally writes a dump of written dex file to FILE (<dexfile>.dump by default)")
                 .hasOptionalArg()
@@ -395,9 +399,12 @@ public class main {
                 .withDescription("sort the items in the dex file into a canonical order before writing")
                 .create("S");
 
-        Option noFixStringConstOption = OptionBuilder.withLongOpt("no-fix-string-const")
-                .withDescription("Don't replace string-const instructions with string-const/jumbo where appropriate")
-                .create("C");
+        Option jumboInstructionsOption = OptionBuilder.withLongOpt("jumbo-instructions")
+                .withDescription("adds support for the jumbo opcodes that were temporarily available around the" +
+                        " ics timeframe. Note that support for these opcodes was removed from newer version of" +
+                        " dalvik. You shouldn't use this option unless you know the dex file will only be used on a" +
+                        " device that supports these opcodes.")
+                .create("J");
 
         Option noFixGotoOption = OptionBuilder.withLongOpt("no-fix-goto")
                 .withDescription("Don't replace goto type instructions with a larger version where appropriate")
@@ -407,10 +414,6 @@ public class main {
                 .withDescription("Generate verbose error messages")
                 .create("V");
 
-        Option oldLexerOption = OptionBuilder.withLongOpt("old-lexer")
-                .withDescription("Use the old lexer")
-                .create("L");
-
         Option printTokensOption = OptionBuilder.withLongOpt("print-tokens")
                 .withDescription("Print the name and text of each token")
                 .create("T");
@@ -419,13 +422,13 @@ public class main {
         basicOptions.addOption(helpOption);
         basicOptions.addOption(outputOption);
         basicOptions.addOption(allowOdexOption);
+        basicOptions.addOption(apiLevelOption);
 
         debugOptions.addOption(dumpOption);
         debugOptions.addOption(sortOption);
-        debugOptions.addOption(noFixStringConstOption);
+        debugOptions.addOption(jumboInstructionsOption);
         debugOptions.addOption(noFixGotoOption);
         debugOptions.addOption(verboseErrorsOption);
-        debugOptions.addOption(oldLexerOption);
         debugOptions.addOption(printTokensOption);
 
         for (Object option: basicOptions.getOptions()) {

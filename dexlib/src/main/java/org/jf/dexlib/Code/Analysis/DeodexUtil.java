@@ -55,23 +55,30 @@ public class DeodexUtil {
         inlineMethodResolver = InlineMethodResolver.createInlineMethodResolver(this, odexHeader.version);
     }
 
+    public DeodexUtil(DexFile dexFile, InlineMethodResolver inlineMethodResolver) {
+        this.dexFile = dexFile;
+        this.inlineMethodResolver = inlineMethodResolver;
+    }
+
     public InlineMethod lookupInlineMethod(AnalyzedInstruction instruction) {
         return inlineMethodResolver.resolveExecuteInline(instruction);
     }
 
-    public FieldIdItem lookupField(ClassPath.ClassDef classDef, int fieldOffset) {
-        ClassPath.FieldDef field = classDef.getInstanceField(fieldOffset);
+    public FieldIdItem lookupField(ClassPath.ClassDef accessingClass, ClassPath.ClassDef instanceClass,
+                                   int fieldOffset) {
+        ClassPath.FieldDef field = instanceClass.getInstanceField(fieldOffset);
         if (field == null) {
             return null;
         }
 
-        return parseAndResolveField(classDef, field);
+        return parseAndResolveField(accessingClass, instanceClass, field);
     }
 
     private static final Pattern shortMethodPattern = Pattern.compile("([^(]+)\\(([^)]*)\\)(.+)");
 
-    public MethodIdItem lookupVirtualMethod(ClassPath.ClassDef classDef, int methodIndex) {
-        String method = classDef.getVirtualMethod(methodIndex);
+    public MethodIdItem lookupVirtualMethod(ClassPath.ClassDef accessingClass, ClassPath.ClassDef instanceClass,
+                                            int methodIndex) {
+        String method = instanceClass.getVirtualMethod(methodIndex);
         if (method == null) {
             return null;
         }
@@ -86,16 +93,20 @@ public class DeodexUtil {
         String methodParams = m.group(2);
         String methodRet = m.group(3);
 
-        if (classDef.isInterface()) {
-            classDef = classDef.getSuperclass();
-            assert classDef != null;
+        if (instanceClass instanceof ClassPath.UnresolvedClassDef) {
+            //if this is an unresolved class, the only way getVirtualMethod could have found a method is if the virtual
+            //method being looked up was a method on java.lang.Object.
+            instanceClass = ClassPath.getClassDef("Ljava/lang/Object;");
+        } else if (instanceClass.isInterface()) {
+            instanceClass = instanceClass.getSuperclass();
+            assert instanceClass != null;
         }
 
-        return parseAndResolveMethod(classDef, methodName, methodParams, methodRet);
+        return parseAndResolveMethod(accessingClass, instanceClass, methodName, methodParams, methodRet);
     }
 
-    private MethodIdItem parseAndResolveMethod(ClassPath.ClassDef classDef, String methodName, String methodParams,
-                                               String methodRet) {
+    private MethodIdItem parseAndResolveMethod(ClassPath.ClassDef accessingClass, ClassPath.ClassDef definingClass,
+                                               String methodName, String methodParams, String methodRet) {
         StringIdItem methodNameItem = StringIdItem.lookupStringIdItem(dexFile, methodName);
         if (methodNameItem == null) {
             return null;
@@ -188,14 +199,14 @@ public class DeodexUtil {
             return null;
         }
 
-        ClassPath.ClassDef methodClassDef = classDef;
+        ClassPath.ClassDef methodClassDef = definingClass;
 
         do {
             TypeIdItem classTypeItem = TypeIdItem.lookupTypeIdItem(dexFile, methodClassDef.getClassType());
 
             if (classTypeItem != null) {
                 MethodIdItem methodIdItem = MethodIdItem.lookupMethodIdItem(dexFile, classTypeItem, protoItem, methodNameItem);
-                if (methodIdItem != null) {
+                if (methodIdItem != null && checkClassAccess(accessingClass, methodClassDef)) {
                     return methodIdItem;
                 }
             }
@@ -205,7 +216,28 @@ public class DeodexUtil {
         return null;
     }
 
-    private FieldIdItem parseAndResolveField(ClassPath.ClassDef classDef, ClassPath.FieldDef field) {
+    private static boolean checkClassAccess(ClassPath.ClassDef accessingClass, ClassPath.ClassDef definingClass) {
+        return definingClass.isPublic() ||
+                getPackage(accessingClass.getClassType()).equals(getPackage(definingClass.getClassType()));
+    }
+
+    private static String getPackage(String classRef) {
+        int lastSlash = classRef.lastIndexOf('/');
+        if (lastSlash < 0) {
+            return "";
+        }
+        return classRef.substring(1, lastSlash);
+    }
+
+    /**
+     *
+     * @param accessingClass The class that contains the field reference. I.e. the class being deodexed
+     * @param instanceClass The inferred class type  of the object that the field is being accessed on
+     * @param field The field being accessed
+     * @return The FieldIdItem of the resolved field
+     */
+    private FieldIdItem parseAndResolveField(ClassPath.ClassDef accessingClass, ClassPath.ClassDef instanceClass,
+                                             ClassPath.FieldDef field) {
         String definingClass = field.definingClass;
         String fieldName = field.name;
         String fieldType = field.type;
@@ -220,7 +252,7 @@ public class DeodexUtil {
             return null;
         }
 
-        ClassPath.ClassDef fieldClass = classDef;
+        ClassPath.ClassDef fieldClass = instanceClass;
 
         ArrayList<ClassPath.ClassDef> parents = new ArrayList<ClassPath.ClassDef>();
         parents.add(fieldClass);
@@ -239,14 +271,14 @@ public class DeodexUtil {
             }
 
             FieldIdItem fieldIdItem = FieldIdItem.lookupFieldIdItem(dexFile, classTypeItem, fieldTypeItem, fieldNameItem);
-            if (fieldIdItem != null) {
+            if (fieldIdItem != null && checkClassAccess(accessingClass, fieldClass)) {
                 return fieldIdItem;
             }
         }
         return null;
     }
 
-    public class InlineMethod {
+    public static class InlineMethod {
         public final int methodType;
         public final String classType;
         public final String methodName;
@@ -264,17 +296,18 @@ public class DeodexUtil {
             this.returnType = returnType;
         }
 
-        public MethodIdItem getMethodIdItem() {
+        public MethodIdItem getMethodIdItem(DeodexUtil deodexUtil) {
             if (methodIdItem == null) {
-                loadMethod();
+                loadMethod(deodexUtil);
             }
             return methodIdItem;
         }
 
-        private void loadMethod() {
+        private void loadMethod(DeodexUtil deodexUtil) {
             ClassPath.ClassDef classDef = ClassPath.getClassDef(classType);
 
-            this.methodIdItem = parseAndResolveMethod(classDef, methodName, parameters, returnType);
+            this.methodIdItem = deodexUtil.parseAndResolveMethod(classDef, classDef, methodName, parameters,
+                    returnType);
         }
 
         public String getMethodString() {

@@ -58,7 +58,6 @@ public class ClassFileNameHandler {
             throw new RuntimeException("Not a valid dalvik class name");
         }
 
-        String blah;
         int packageElementCount = 1;
         for (int i=1; i<className.length()-1; i++) {
             if (className.charAt(i) == '/') {
@@ -66,6 +65,7 @@ public class ClassFileNameHandler {
             }
         }
 
+        String packageElement;
         String[] packageElements = new String[packageElementCount];
         int elementIndex = 0;
         int elementStart = 1;
@@ -77,7 +77,13 @@ public class ClassFileNameHandler {
                     throw new RuntimeException("Not a valid dalvik class name");
                 }
 
-                packageElements[elementIndex++] = className.substring(elementStart, i);
+                packageElement = className.substring(elementStart, i);
+
+                if (modifyWindowsReservedFilenames && isReservedFileName(packageElement)) {
+                    packageElement += "#";
+                }
+
+                packageElements[elementIndex++] = packageElement;
                 elementStart = ++i;
             }
         }
@@ -89,7 +95,13 @@ public class ClassFileNameHandler {
         if (elementStart >= className.length()-1) {
             throw new RuntimeException("Not a valid dalvik class name");
         }
-        packageElements[elementIndex] = className.substring(elementStart, className.length()-1);
+
+        packageElement = className.substring(elementStart, className.length()-1);
+        if (modifyWindowsReservedFilenames && isReservedFileName(packageElement)) {
+            packageElement += "#";
+        }
+
+        packageElements[elementIndex] = packageElement;
 
         return top.addUniqueChild(packageElements, 0);
     }
@@ -109,23 +121,6 @@ public class ClassFileNameHandler {
             return false;
         } catch (IOException ex) {
             //if an exception occured, it's likely that we're on a windows system.
-        }
-
-        //let's try one more reserved filename
-        f = new File(path, "con.smali");
-        if (f.exists()) {
-            return false;
-        }
-
-        try {
-            FileWriter writer = new FileWriter(f);
-            writer.write("test");
-            writer.flush();
-            writer.close();
-            f.delete(); //doesn't throw IOException
-            return false;
-        } catch (IOException ex) {
-            //yup, looks like we're on a windows system
             return true;
         }
     }
@@ -170,15 +165,9 @@ public class ClassFileNameHandler {
 
             if (pathElementsIndex == pathElements.length - 1) {
                 elementName = pathElements[pathElementsIndex];
-                if (modifyWindowsReservedFilenames && isReservedFileName(elementName)) {
-                    elementName += "#";
-                }
                 elementName += fileExtension;
             } else {
                 elementName = pathElements[pathElementsIndex];
-                if (modifyWindowsReservedFilenames && isReservedFileName(elementName)) {
-                    elementName += "#";
-                }
             }
             elementNameLower = elementName.toLowerCase();
 

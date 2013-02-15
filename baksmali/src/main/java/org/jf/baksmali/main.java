@@ -29,15 +29,17 @@
 package org.jf.baksmali;
 
 import org.apache.commons.cli.*;
+import org.jf.dexlib.Code.Opcode;
 import org.jf.dexlib.DexFile;
 import org.jf.util.ConsoleUtil;
-import org.jf.util.smaliHelpFormatter;
+import org.jf.util.SmaliHelpFormatter;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 
 public class main {
@@ -83,6 +85,9 @@ public class main {
      * Run!
      */
     public static void main(String[] args) {
+        Locale locale = new Locale("en", "US");
+        Locale.setDefault(locale);
+
         CommandLineParser parser = new PosixParser();
         CommandLine commandLine;
 
@@ -107,6 +112,9 @@ public class main {
         boolean deodex = false;
         boolean verify = false;
         boolean ignoreErrors = false;
+        boolean checkPackagePrivateAccess = false;
+
+        int apiLevel = 14;
 
         int registerInfo = 0;
 
@@ -118,7 +126,8 @@ public class main {
         StringBuffer extraBootClassPathEntries = new StringBuffer();
         List<String> bootClassPathDirs = new ArrayList<String>();
         bootClassPathDirs.add(".");
-
+        String inlineTable = null;
+        boolean jumboInstructions = false;
 
         String[] remainingArgs = commandLine.getArgs();
 
@@ -208,6 +217,12 @@ public class main {
                 case 'm':
                     noAccessorComments = true;
                     break;
+                case 'a':
+                    apiLevel = Integer.parseInt(commandLine.getOptionValue("a"));
+                    if (apiLevel >= 17) {
+                        checkPackagePrivateAccess = true;
+                    }
+                    break;
                 case 'N':
                     disassemble = false;
                     break;
@@ -217,6 +232,9 @@ public class main {
                     break;
                 case 'I':
                     ignoreErrors = true;
+                    break;
+                case 'J':
+                    jumboInstructions = true;
                     break;
                 case 'W':
                     write = true;
@@ -230,6 +248,12 @@ public class main {
                     break;
                 case 'V':
                     verify = true;
+                    break;
+                case 'T':
+                    inlineTable = commandLine.getOptionValue("T");
+                    break;
+                case 'K':
+                    checkPackagePrivateAccess = true;
                     break;
                 default:
                     assert false;
@@ -249,6 +273,8 @@ public class main {
                 System.err.println("Can't find the file " + inputDexFileName);
                 System.exit(1);
             }
+
+            Opcode.updateMapsForApiLevel(apiLevel, jumboInstructions);
 
             //Read in and parse the dex file
             DexFile dexFile = new DexFile(dexFileFile, !fixRegisters, false);
@@ -282,7 +308,7 @@ public class main {
                 baksmali.disassembleDexFile(dexFileFile.getPath(), dexFile, deodex, outputDirectory,
                         bootClassPathDirsArray, bootClassPath, extraBootClassPathEntries.toString(),
                         noParameterRegisters, useLocalsDirective, useSequentialLabels, outputDebugInfo, addCodeOffsets,
-                        noAccessorComments, registerInfo, verify, ignoreErrors);
+                        noAccessorComments, registerInfo, verify, ignoreErrors, inlineTable, checkPackagePrivateAccess);
             }
 
             if ((doDump || write) && !dexFile.isOdex()) {
@@ -309,20 +335,16 @@ public class main {
      * Prints the usage message.
      */
     private static void usage(boolean printDebugOptions) {
-        smaliHelpFormatter formatter = new smaliHelpFormatter();
-        formatter.setWidth(ConsoleUtil.getConsoleWidth());
+        SmaliHelpFormatter formatter = new SmaliHelpFormatter();
+        int consoleWidth = ConsoleUtil.getConsoleWidth();
+        if (consoleWidth <= 0) {
+            consoleWidth = 80;
+        }
+
+        formatter.setWidth(consoleWidth);
 
         formatter.printHelp("java -jar baksmali.jar [options] <dex-file>",
-                "disassembles and/or dumps a dex file", basicOptions, "");
-
-        if (printDebugOptions) {
-            System.out.println();
-            System.out.println("Debug Options:");
-
-            StringBuffer sb = new StringBuffer();
-            formatter.renderOptions(sb, debugOptions);
-            System.out.println(sb.toString());
-        }
+                "disassembles and/or dumps a dex file", basicOptions, printDebugOptions?debugOptions:null);
     }
 
     private static void usage() {
@@ -415,6 +437,13 @@ public class main {
                 .withDescription("don't output helper comments for synthetic accessors")
                 .create("m");
 
+        Option apiLevelOption = OptionBuilder.withLongOpt("api-level")
+                .withDescription("The numeric api-level of the file being disassembled. If not " +
+                        "specified, it defaults to 14 (ICS).")
+                .hasArg()
+                .withArgName("API_LEVEL")
+                .create("a");
+
         Option dumpOption = OptionBuilder.withLongOpt("dump-to")
                 .withDescription("dumps the given dex file into a single annotated dump file named FILE" +
                         " (<dexfile>.dump by default), along with the normal disassembly")
@@ -427,6 +456,13 @@ public class main {
                         " ignoring the class if needed, and continuing with the next class. The default" +
                         " behavior is to stop disassembling and exit once an error is encountered")
                 .create("I");
+
+        Option jumboInstructionsOption = OptionBuilder.withLongOpt("jumbo-instructions")
+                .withDescription("adds support for the jumbo opcodes that were temporarily available around the" +
+                        " ics timeframe. Note that support for these opcodes was removed from newer version of" +
+                        " dalvik. You shouldn't use this option unless you know the dex file contains these jumbo" +
+                        " opcodes.")
+                .create("J");
 
         Option noDisassemblyOption = OptionBuilder.withLongOpt("no-disassembly")
                 .withDescription("suppresses the output of the disassembly")
@@ -451,6 +487,12 @@ public class main {
                 .withDescription("perform bytecode verification")
                 .create("V");
 
+        Option inlineTableOption = OptionBuilder.withLongOpt("inline-table")
+                .withDescription("specify a file containing a custom inline method table to use for deodexing")
+                .hasArg()
+                .withArgName("FILE")
+                .create("T");
+
         basicOptions.addOption(versionOption);
         basicOptions.addOption(helpOption);
         basicOptions.addOption(outputDirOption);
@@ -464,15 +506,17 @@ public class main {
         basicOptions.addOption(classPathDirOption);
         basicOptions.addOption(codeOffsetOption);
         basicOptions.addOption(noAccessorCommentsOption);
+        basicOptions.addOption(apiLevelOption);
 
         debugOptions.addOption(dumpOption);
         debugOptions.addOption(ignoreErrorsOption);
+        debugOptions.addOption(jumboInstructionsOption);
         debugOptions.addOption(noDisassemblyOption);
         debugOptions.addOption(writeDexOption);
         debugOptions.addOption(sortOption);
         debugOptions.addOption(fixSignedRegisterOption);
         debugOptions.addOption(verifyDexOption);
-
+        debugOptions.addOption(inlineTableOption);
 
         for (Object option: basicOptions.getOptions()) {
             options.addOption((Option)option);

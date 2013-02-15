@@ -29,25 +29,25 @@
 package org.jf.baksmali.Adaptors;
 
 import org.jf.dexlib.Util.Utf8Utils;
+import org.jf.util.CommentingIndentingWriter;
 import org.jf.util.IndentingWriter;
 import org.jf.dexlib.*;
 import org.jf.dexlib.Code.Analysis.ValidationException;
 import org.jf.dexlib.Code.Format.Instruction21c;
+import org.jf.dexlib.Code.Format.Instruction41c;
 import org.jf.dexlib.Code.Instruction;
 import org.jf.dexlib.EncodedValue.EncodedValue;
 import org.jf.dexlib.Util.AccessFlags;
 import org.jf.dexlib.Util.SparseArray;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.List;
 
 public class ClassDefinition {
     private ClassDefItem classDefItem;
+    @Nullable
     private ClassDataItem classDataItem;
-
-    private SparseArray<AnnotationSetItem> methodAnnotationsMap;
-    private SparseArray<AnnotationSetItem> fieldAnnotationsMap;
-    private SparseArray<AnnotationSetRefList> parameterAnnotationsMap;
 
     private SparseArray<FieldIdItem> fieldsSetInStaticConstructor;
 
@@ -56,45 +56,11 @@ public class ClassDefinition {
     public ClassDefinition(ClassDefItem classDefItem) {
         this.classDefItem = classDefItem;
         this.classDataItem = classDefItem.getClassData();
-        buildAnnotationMaps();
         findFieldsSetInStaticConstructor();
     }
 
     public boolean hadValidationErrors() {
         return validationErrors;
-    }
-
-    private void buildAnnotationMaps() {
-        AnnotationDirectoryItem annotationDirectory = classDefItem.getAnnotations();
-        if (annotationDirectory == null) {
-            methodAnnotationsMap = new SparseArray<AnnotationSetItem>(0);
-            fieldAnnotationsMap = new SparseArray<AnnotationSetItem>(0);
-            parameterAnnotationsMap = new SparseArray<AnnotationSetRefList>(0);
-            return;
-        }
-
-        methodAnnotationsMap = new SparseArray<AnnotationSetItem>(annotationDirectory.getMethodAnnotationCount());
-        annotationDirectory.iterateMethodAnnotations(new AnnotationDirectoryItem.MethodAnnotationIteratorDelegate() {
-            public void processMethodAnnotations(MethodIdItem method, AnnotationSetItem methodAnnotations) {
-                methodAnnotationsMap.put(method.getIndex(), methodAnnotations);
-            }
-        });
-
-        fieldAnnotationsMap = new SparseArray<AnnotationSetItem>(annotationDirectory.getFieldAnnotationCount());
-        annotationDirectory.iterateFieldAnnotations(new AnnotationDirectoryItem.FieldAnnotationIteratorDelegate() {
-            public void processFieldAnnotations(FieldIdItem field, AnnotationSetItem fieldAnnotations) {
-                fieldAnnotationsMap.put(field.getIndex(), fieldAnnotations);
-            }
-        });
-
-        parameterAnnotationsMap = new SparseArray<AnnotationSetRefList>(
-                annotationDirectory.getParameterAnnotationCount());
-        annotationDirectory.iterateParameterAnnotations(
-          new AnnotationDirectoryItem.ParameterAnnotationIteratorDelegate() {
-            public void processParameterAnnotations(MethodIdItem method, AnnotationSetRefList parameterAnnotations) {
-                parameterAnnotationsMap.put(method.getIndex(), parameterAnnotations);
-            }
-        });
     }
 
     private void findFieldsSetInStaticConstructor() {
@@ -115,10 +81,24 @@ public class ClassDefinition {
                         case SPUT_CHAR:
                         case SPUT_OBJECT:
                         case SPUT_SHORT:
-                        case SPUT_WIDE:
+                        case SPUT_WIDE: {
                             Instruction21c ins = (Instruction21c)instruction;
                             FieldIdItem fieldIdItem = (FieldIdItem)ins.getReferencedItem();
                             fieldsSetInStaticConstructor.put(fieldIdItem.getIndex(), fieldIdItem);
+                            break;
+                        }
+                        case SPUT_JUMBO:
+                        case SPUT_BOOLEAN_JUMBO:
+                        case SPUT_BYTE_JUMBO:
+                        case SPUT_CHAR_JUMBO:
+                        case SPUT_OBJECT_JUMBO:
+                        case SPUT_SHORT_JUMBO:
+                        case SPUT_WIDE_JUMBO: {
+                            Instruction41c ins = (Instruction41c)instruction;
+                            FieldIdItem fieldIdItem = (FieldIdItem)ins.getReferencedItem();
+                            fieldsSetInStaticConstructor.put(fieldIdItem.getIndex(), fieldIdItem);
+                            break;
+                        }
                     }
                 }
             }
@@ -135,7 +115,6 @@ public class ClassDefinition {
         writeInstanceFields(writer);
         writeDirectMethods(writer);
         writeVirtualMethods(writer);
-        return ;
     }
 
     private void writeClass(IndentingWriter writer) throws IOException {
@@ -222,32 +201,43 @@ public class ClassDefinition {
             staticInitializers = new EncodedValue[0];
         }
 
-        ClassDataItem.EncodedField[] encodedFields = classDataItem.getStaticFields();
-        if (encodedFields == null || encodedFields.length == 0) {
+        List<ClassDataItem.EncodedField> encodedFields = classDataItem.getStaticFields();
+        if (encodedFields.size() == 0) {
             return;
         }
 
         writer.write("\n\n");
         writer.write("# static fields\n");
 
-        boolean first = true;
-        for (int i=0; i<encodedFields.length; i++) {
-            if (!first) {
+        for (int i=0; i<encodedFields.size(); i++) {
+            if (i > 0) {
                 writer.write('\n');
             }
-            first = false;
 
-            ClassDataItem.EncodedField field = encodedFields[i];
+            ClassDataItem.EncodedField field = encodedFields.get(i);
             EncodedValue encodedValue = null;
             if (i < staticInitializers.length) {
                 encodedValue = staticInitializers[i];
             }
-            AnnotationSetItem annotationSet = fieldAnnotationsMap.get(field.field.getIndex());
+            AnnotationSetItem fieldAnnotations = null;
+            AnnotationDirectoryItem annotations = classDefItem.getAnnotations();
+            if (annotations != null) {
+                fieldAnnotations = annotations.getFieldAnnotations(field.field);
+            }
+
+            IndentingWriter fieldWriter = writer;
+            // the encoded fields are sorted, so we just have to compare with the previous one to detect duplicates
+            if (i > 0 && field.equals(encodedFields.get(i-1))) {
+                fieldWriter = new CommentingIndentingWriter(writer, "#");
+                fieldWriter.write("Ignoring field with duplicate signature\n");
+                System.err.println(String.format("Warning: class %s has duplicate static field %s, Ignoring.",
+                        classDefItem.getClassType().getTypeDescriptor(), field.field.getShortFieldString()));
+            }
 
             boolean setInStaticConstructor =
                     fieldsSetInStaticConstructor.get(field.field.getIndex()) != null;
 
-            FieldDefinition.writeTo(writer, field, encodedValue, annotationSet, setInStaticConstructor);
+            FieldDefinition.writeTo(fieldWriter, field, encodedValue, fieldAnnotations, setInStaticConstructor);
         }
     }
 
@@ -256,23 +246,36 @@ public class ClassDefinition {
             return;
         }
 
-        ClassDataItem.EncodedField[] encodedFields = classDataItem.getInstanceFields();
-        if (encodedFields == null || encodedFields.length == 0) {
+        List<ClassDataItem.EncodedField> encodedFields = classDataItem.getInstanceFields();
+        if (encodedFields.size() == 0) {
             return;
         }
 
         writer.write("\n\n");
         writer.write("# instance fields\n");
-        boolean first = true;
-        for (ClassDataItem.EncodedField field: classDataItem.getInstanceFields()) {
-            if (!first) {
+        for (int i=0; i<encodedFields.size(); i++) {
+            ClassDataItem.EncodedField field = encodedFields.get(i);
+
+            if (i > 0) {
                 writer.write('\n');
             }
-            first = false;
 
-            AnnotationSetItem annotationSet = fieldAnnotationsMap.get(field.field.getIndex());
+            AnnotationSetItem fieldAnnotations = null;
+            AnnotationDirectoryItem annotations = classDefItem.getAnnotations();
+            if (annotations != null) {
+                fieldAnnotations = annotations.getFieldAnnotations(field.field);
+            }
 
-            FieldDefinition.writeTo(writer, field, null, annotationSet, false);
+            IndentingWriter fieldWriter = writer;
+            // the encoded fields are sorted, so we just have to compare with the previous one to detect duplicates
+            if (i > 0 && field.equals(encodedFields.get(i-1))) {
+                fieldWriter = new CommentingIndentingWriter(writer, "#");
+                fieldWriter.write("Ignoring field with duplicate signature\n");
+                System.err.println(String.format("Warning: class %s has duplicate instance field %s, Ignoring.",
+                        classDefItem.getClassType().getTypeDescriptor(), field.field.getShortFieldString()));
+            }
+
+            FieldDefinition.writeTo(fieldWriter, field, null, fieldAnnotations, false);
         }
     }
 
@@ -281,9 +284,8 @@ public class ClassDefinition {
             return;
         }
 
-        ClassDataItem.EncodedMethod[] directMethods = classDataItem.getDirectMethods();
-
-        if (directMethods == null || directMethods.length == 0) {
+        List<ClassDataItem.EncodedMethod> directMethods = classDataItem.getDirectMethods();
+        if (directMethods.size() == 0) {
             return;
         }
 
@@ -297,9 +299,9 @@ public class ClassDefinition {
             return;
         }
 
-        ClassDataItem.EncodedMethod[] virtualMethods = classDataItem.getVirtualMethods();
+        List<ClassDataItem.EncodedMethod> virtualMethods = classDataItem.getVirtualMethods();
 
-        if (virtualMethods == null || virtualMethods.length == 0) {
+        if (virtualMethods.size() == 0) {
             return;
         }
 
@@ -308,19 +310,32 @@ public class ClassDefinition {
         writeMethods(writer, virtualMethods);
     }
 
-    private void writeMethods(IndentingWriter writer, ClassDataItem.EncodedMethod[] methods) throws IOException {
-        boolean first = true;
-        for (ClassDataItem.EncodedMethod method: methods) {
-            if (!first) {
+    private void writeMethods(IndentingWriter writer, List<ClassDataItem.EncodedMethod> methods) throws IOException {
+        for (int i=0; i<methods.size(); i++) {
+            ClassDataItem.EncodedMethod method = methods.get(i);
+            if (i > 0) {
                 writer.write('\n');
             }
-            first = false;
 
-            AnnotationSetItem annotationSet = methodAnnotationsMap.get(method.method.getIndex());
-            AnnotationSetRefList parameterAnnotationList = parameterAnnotationsMap.get(method.method.getIndex());
+            AnnotationSetItem methodAnnotations = null;
+            AnnotationSetRefList parameterAnnotations = null;
+            AnnotationDirectoryItem annotations = classDefItem.getAnnotations();
+            if (annotations != null) {
+                methodAnnotations = annotations.getMethodAnnotations(method.method);
+                parameterAnnotations = annotations.getParameterAnnotations(method.method);
+            }
+
+            IndentingWriter methodWriter = writer;
+            // the encoded methods are sorted, so we just have to compare with the previous one to detect duplicates
+            if (i > 0 && method.equals(methods.get(i-1))) {
+                methodWriter = new CommentingIndentingWriter(writer, "#");
+                methodWriter.write("Ignoring method with duplicate signature\n");
+                System.err.println(String.format("Warning: class %s has duplicate method %s, Ignoring.",
+                        classDefItem.getClassType().getTypeDescriptor(), method.method.getShortMethodString()));
+            }
 
             MethodDefinition methodDefinition = new MethodDefinition(method);
-            methodDefinition.writeTo(writer, annotationSet, parameterAnnotationList);
+            methodDefinition.writeTo(methodWriter, methodAnnotations, parameterAnnotations);
 
             ValidationException validationException = methodDefinition.getValidationException();
             if (validationException != null) {
