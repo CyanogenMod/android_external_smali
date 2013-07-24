@@ -19,7 +19,7 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 
-LOCAL_MODULE := smali
+LOCAL_MODULE := smalilib
 
 LOCAL_MODULE_TAGS := optional
 
@@ -30,20 +30,18 @@ LOCAL_IS_HOST_MODULE := true
 intermediates := $(call local-intermediates-dir,COMMON)
 
 GEN := $(addprefix $(intermediates)/, \
-			smaliLexer.java \
 			smaliParser.java \
 			smaliTreeWalker.java \
         )
 
 ANTLR_JAR = $(call java-lib-deps,antlr,true)
 
-$(intermediates)/smaliTreeWalker.java: $(intermediates)/smaliParser.java $(intermediates)/smaliLexer.java
-$(intermediates)/smaliParser.java: $(intermediates)/smaliLexer.java
+$(intermediates)/smaliTreeWalker.java: $(intermediates)/smaliParser.java
 
 $(GEN): $(ANTLR_JAR)
 $(GEN): PRIVATE_PATH := $(LOCAL_PATH)
 $(GEN): PRIVATE_CUSTOM_TOOL = java -jar $(ANTLR_JAR) -fo $(dir $@) $<
-$(GEN): $(intermediates)/%.java :  $(LOCAL_PATH)/src/main/antlr3/org/jf/smali/%.g
+$(GEN): $(intermediates)/%.java :  $(LOCAL_PATH)/src/main/antlr3/%.g
 	$(transform-generated-source)
 
 LOCAL_GENERATED_SOURCES += $(GEN)
@@ -57,10 +55,12 @@ LOCAL_JAR_MANIFEST := manifest.txt
 
 LOCAL_STATIC_JAVA_LIBRARIES := \
 	antlr-runtime \
-	commons-cli-1.2
+	commons-cli-1.2 \
+	guavalib \
+	jsr305lib
 
-#extract the current version from the pom file
-SMALI_VERSION := $(shell xsltproc $(LOCAL_PATH)/../extract-property.xslt $(LOCAL_PATH)/../pom.xml)
+#read in the version number
+SMALI_VERSION := $(shell cat $(LOCAL_PATH)/../version)
 
 #create a new smali.properties file using the correct version
 $(intermediates)/resources/smali.properties:
@@ -84,7 +84,7 @@ LOCAL_MODULE := smali
 
 include $(BUILD_SYSTEM)/base_rules.mk
 
-$(LOCAL_BUILT_MODULE): $(HOST_OUT_JAVA_LIBRARIES)/smali.jar
+$(LOCAL_BUILT_MODULE): $(HOST_OUT_JAVA_LIBRARIES)/smalilib.jar
 $(LOCAL_BUILT_MODULE): $(LOCAL_PATH)/../scripts/smali | $(ACP)
 	@echo "Copy: $(PRIVATE_MODULE) ($@)"
 	$(copy-file-to-new-target)

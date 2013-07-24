@@ -30,8 +30,7 @@ package org.jf.baksmali;
 
 import org.jf.baksmali.Adaptors.ClassDefinition;
 import org.jf.dexlib.ClassDefItem;
-import org.jf.dexlib.Code.Analysis.ClassPath;
-import org.jf.dexlib.Code.Analysis.SyntheticAccessorResolver;
+import org.jf.dexlib.Code.Analysis.*;
 import org.jf.dexlib.DexFile;
 import org.jf.util.ClassFileNameHandler;
 import org.jf.util.IndentingWriter;
@@ -52,6 +51,7 @@ public class baksmali {
     public static boolean noAccessorComments = false;
     public static boolean deodex = false;
     public static boolean verify = false;
+    public static InlineMethodResolver inlineResolver = null;
     public static int registerInfo = 0;
     public static String bootClassPath;
 
@@ -62,7 +62,7 @@ public class baksmali {
                                           boolean noParameterRegisters, boolean useLocalsDirective,
                                           boolean useSequentialLabels, boolean outputDebugInfo, boolean addCodeOffsets,
                                           boolean noAccessorComments, int registerInfo, boolean verify,
-                                          boolean ignoreErrors)
+                                          boolean ignoreErrors, String inlineTable, boolean checkPackagePrivateAccess)
     {
         baksmali.noParameterRegisters = noParameterRegisters;
         baksmali.useLocalsDirective = useLocalsDirective;
@@ -74,16 +74,6 @@ public class baksmali {
         baksmali.registerInfo = registerInfo;
         baksmali.bootClassPath = bootClassPath;
         baksmali.verify = verify;
-
-        ClassPath.ClassPathErrorHandler classPathErrorHandler = null;
-        if (ignoreErrors) {
-            classPathErrorHandler = new ClassPath.ClassPathErrorHandler() {
-                public void ClassPathError(String className, Exception ex) {
-                    System.err.println(String.format("Skipping %s", className));
-                    ex.printStackTrace(System.err);
-                }
-            };
-        }
 
         if (registerInfo != 0 || deodex || verify) {
             try {
@@ -102,14 +92,18 @@ public class baksmali {
                         extraBootClassPathArray = new String[] {"framework.jar"};
                     }
                     ClassPath.InitializeClassPathFromOdex(classPathDirs, extraBootClassPathArray, dexFilePath, dexFile,
-                            classPathErrorHandler);
+                            checkPackagePrivateAccess);
                 } else {
                     String[] bootClassPathArray = null;
                     if (bootClassPath != null) {
                         bootClassPathArray = bootClassPath.split(":");
                     }
                     ClassPath.InitializeClassPath(classPathDirs, bootClassPathArray, extraBootClassPathArray,
-                            dexFilePath, dexFile, classPathErrorHandler);
+                            dexFilePath, dexFile, checkPackagePrivateAccess);
+                }
+
+                if (inlineTable != null) {
+                    inlineResolver = new CustomInlineMethodResolver(inlineTable);
                 }
             } catch (Exception ex) {
                 System.err.println("\n\nError occured while loading boot class path files. Aborting.");
@@ -152,15 +146,6 @@ public class baksmali {
              * package name are separated by '/'
              */
 
-            if (registerInfo != 0 || deodex || verify) {
-                //If we are analyzing the bytecode, make sure that this class is loaded into the ClassPath. If it isn't
-                //then there was some error while loading it, and we should skip it
-                ClassPath.ClassDef classDef = ClassPath.getClassDef(classDefItem.getClassType(), false);
-                if (classDef == null || classDef instanceof ClassPath.UnresolvedClassDef) {
-                    continue;
-                }
-            }
-
             String classDescriptor = classDefItem.getClassType().getTypeDescriptor();
 
             //validate that the descriptor is formatted like we expect
@@ -202,6 +187,7 @@ public class baksmali {
             } catch (Exception ex) {
                 System.err.println("\n\nError occured while disassembling class " + classDescriptor.replace('/', '.') + " - skipping class");
                 ex.printStackTrace();
+                smaliFile.delete();
             }
             finally
             {

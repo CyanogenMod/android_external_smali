@@ -19,7 +19,7 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 
-LOCAL_MODULE := baksmali
+LOCAL_MODULE := baksmalilib
 
 LOCAL_MODULE_TAGS := optional
 
@@ -38,10 +38,11 @@ LOCAL_JAR_MANIFEST := manifest.txt
 
 LOCAL_STATIC_JAVA_LIBRARIES := \
 	antlr-runtime \
-	commons-cli-1.2
+	commons-cli-1.2 \
+	guavalib
 
-#extract the current version from the pom file
-BAKSMALI_VERSION := $(shell xsltproc $(LOCAL_PATH)/../extract-property.xslt $(LOCAL_PATH)/../pom.xml)
+#read in the version number
+BAKSMALI_VERSION := $(shell cat $(LOCAL_PATH)/../version)
 
 #create a new baksmali.properties file using the correct version
 $(intermediates)/resources/baksmali.properties:
@@ -65,7 +66,7 @@ LOCAL_MODULE := baksmali
 
 include $(BUILD_SYSTEM)/base_rules.mk
 
-$(LOCAL_BUILT_MODULE): $(HOST_OUT_JAVA_LIBRARIES)/baksmali.jar
+$(LOCAL_BUILT_MODULE): $(HOST_OUT_JAVA_LIBRARIES)/baksmalilib.jar
 $(LOCAL_BUILT_MODULE): $(LOCAL_PATH)/../scripts/baksmali | $(ACP)
 	@echo "Copy: $(PRIVATE_MODULE) ($@)"
 	$(copy-file-to-new-target)

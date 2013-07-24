@@ -31,7 +31,7 @@ package org.jf.dexlib;
 import org.jf.dexlib.Util.AnnotatedOutput;
 import org.jf.dexlib.Util.Input;
 
-public class FieldIdItem extends Item<FieldIdItem> {
+public class FieldIdItem extends Item<FieldIdItem> implements Convertible<FieldIdItem> {
     private int hashCode = 0;
 
     private TypeIdItem classType;
@@ -117,8 +117,20 @@ public class FieldIdItem extends Item<FieldIdItem> {
             out.annotate(4, "field_name: " + fieldName.getStringValue());
         }
 
-        out.writeShort(classType.getIndex());
-        out.writeShort(fieldType.getIndex());
+        int classIndex = classType.getIndex();
+        if (classIndex > 0xffff) {
+            throw new RuntimeException(String.format("Error writing field_id_item for %s. The type index of " +
+                    "defining class %s is too large", getFieldString(), classType.getTypeDescriptor()));
+        }
+        out.writeShort(classIndex);
+
+        int typeIndex = fieldType.getIndex();
+        if (typeIndex > 0xffff) {
+            throw new RuntimeException(String.format("Error writing field_id_item for %s. The type index of field " +
+                    "type %s is too large", getFieldString(), fieldType.getTypeDescriptor()));
+        }
+        out.writeShort(typeIndex);
+
         out.writeInt(fieldName.getIndex());
     }
 
@@ -189,6 +201,25 @@ public class FieldIdItem extends Item<FieldIdItem> {
         return cachedFieldString;
     }
 
+    String cachedShortFieldString = null;
+    /**
+     * @return a "short" string containing just the field name and type, formatted like fieldName:fieldType
+     */
+    public String getShortFieldString() {
+        if (cachedShortFieldString == null) {
+            String fieldName = this.fieldName.getStringValue();
+            String fieldType = this.fieldType.getTypeDescriptor();
+
+            StringBuffer sb = new StringBuffer(fieldName.length() + fieldType.length() + 1);
+            sb.append(fieldName);
+            sb.append(":");
+            sb.append(fieldType);
+            cachedShortFieldString = sb.toString();
+        }
+        return cachedShortFieldString;
+    }
+
+
     /**
      * calculate and cache the hashcode
      */
@@ -224,5 +255,9 @@ public class FieldIdItem extends Item<FieldIdItem> {
         return (classType == other.classType &&
                 fieldType == other.fieldType &&
                 fieldName == other.fieldName);
+    }
+
+    public FieldIdItem convert() {
+        return this;
     }
 }

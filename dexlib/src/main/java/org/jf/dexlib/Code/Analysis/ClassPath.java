@@ -33,6 +33,8 @@ import org.jf.dexlib.Util.AccessFlags;
 import org.jf.dexlib.Util.ExceptionWithContext;
 import org.jf.dexlib.Util.SparseArray;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.File;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -44,19 +46,20 @@ import static org.jf.dexlib.ClassDataItem.EncodedMethod;
 public class ClassPath {
     private static ClassPath theClassPath = null;
 
+    /**
+     * The current version of dalvik in master(AOSP) has a slight change to the way the
+     * virtual tables are computed. This should be set to true to use the new logic.
+     * TODO: set this based on api level, once it's present in a released version of Android
+     */
+    private boolean checkPackagePrivateAccess;
+
     private final HashMap<String, ClassDef> classDefs;
-    protected ClassDef javaLangObjectClassDef; //Ljava/lang/Object;
+    protected ClassDef javaLangObjectClassDef; //cached ClassDef for Ljava/lang/Object;
 
-    //This is only used while initialing the class path. It is set to null after initialization has finished.
-    private LinkedHashMap<String, TempClassInfo> tempClasses;
-
+    // Contains the classes that we haven't loaded yet
+    private HashMap<String, UnresolvedClassInfo> unloadedClasses;
 
     private static final Pattern dalvikCacheOdexPattern = Pattern.compile("@([^@]+)@classes.dex$");
-
-
-    public static interface ClassPathErrorHandler {
-        void ClassPathError(String className, Exception ex);
-    }
 
     /**
      * Initialize the class path using the dependencies from an odex file
@@ -65,12 +68,10 @@ public class ClassPath {
      * from the odex file
      * @param dexFilePath The path of the dex file (used for error reporting purposes only)
      * @param dexFile The DexFile to load - it must represents an odex file
-     * @param errorHandler a ClassPathErrorHandler object to receive and handle any errors that occur while loading
-     * classes
      */
     public static void InitializeClassPathFromOdex(String[] classPathDirs, String[] extraBootClassPathEntries,
                                                    String dexFilePath, DexFile dexFile,
-                                                   ClassPathErrorHandler errorHandler) {
+                                                   boolean checkPackagePrivateAccess) {
         if (!dexFile.isOdex()) {
             throw new ExceptionWithContext("Cannot use InitialiazeClassPathFromOdex with a non-odex DexFile");
         }
@@ -108,7 +109,7 @@ public class ClassPath {
 
         theClassPath = new ClassPath();
         theClassPath.initClassPath(classPathDirs, bootClassPath, extraBootClassPathEntries, dexFilePath, dexFile,
-                errorHandler);
+                checkPackagePrivateAccess);
     }
 
     /**
@@ -117,19 +118,18 @@ public class ClassPath {
      * @param bootClassPath A list of the boot class path entries to search for and load
      * @param dexFilePath The path of the dex file (used for error reporting purposes only)
      * @param dexFile the DexFile to load
-     * @param errorHandler a ClassPathErrorHandler object to receive and handle any errors that occur while loading
      * classes
      */
     public static void InitializeClassPath(String[] classPathDirs, String[] bootClassPath,
                                            String[] extraBootClassPathEntries, String dexFilePath, DexFile dexFile,
-                                           ClassPathErrorHandler errorHandler) {
+                                           boolean checkPackagePrivateAccess) {
         if (theClassPath != null) {
             throw new ExceptionWithContext("Cannot initialize ClassPath multiple times");
         }
 
         theClassPath = new ClassPath();
         theClassPath.initClassPath(classPathDirs, bootClassPath, extraBootClassPathEntries, dexFilePath, dexFile,
-                errorHandler);
+                checkPackagePrivateAccess);
     }
 
     private ClassPath() {
@@ -137,8 +137,9 @@ public class ClassPath {
     }
 
     private void initClassPath(String[] classPathDirs, String[] bootClassPath, String[] extraBootClassPathEntries,
-                               String dexFilePath, DexFile dexFile, ClassPathErrorHandler errorHandler) {
-        tempClasses = new LinkedHashMap<String, TempClassInfo>();
+                               String dexFilePath, DexFile dexFile, boolean checkPackagePrivateAccess) {
+        this.checkPackagePrivateAccess = checkPackagePrivateAccess;
+        unloadedClasses = new LinkedHashMap<String, UnresolvedClassInfo>();
 
         if (bootClassPath != null) {
             for (String bootClassPathEntry: bootClassPath) {
@@ -156,32 +157,12 @@ public class ClassPath {
             loadDexFile(dexFilePath, dexFile);
         }
 
-
-        for (String classType: tempClasses.keySet()) {
-            ClassDef classDef = null;
-            try {
-                classDef = ClassPath.loadClassDef(classType);
-                assert classDef != null;
-            } catch (Exception ex) {
-                if (errorHandler != null) {
-                    errorHandler.ClassPathError(classType, ex);
-                } else {
-                    throw ExceptionWithContext.withContext(ex,
-                            String.format("Error while loading ClassPath class %s", classType));
-                }
-            }
-
-            if (classType.equals("Ljava/lang/Object;")) {
-                this.javaLangObjectClassDef = classDef;
-            }
-        }
+        javaLangObjectClassDef = getClassDef("Ljava/lang/Object;", false);
 
         for (String primitiveType: new String[]{"Z", "B", "S", "C", "I", "J", "F", "D"}) {
             ClassDef classDef = new PrimitiveClassDef(primitiveType);
             classDefs.put(primitiveType, classDef);
         }
-
-        tempClasses = null;
     }
 
     private void loadBootClassPath(String[] classPathDirs, String bootClassPathEntry) {
@@ -240,10 +221,11 @@ public class ClassPath {
     private void loadDexFile(String dexFilePath, DexFile dexFile) {
         for (ClassDefItem classDefItem: dexFile.ClassDefsSection.getItems()) {
             try {
-                //TODO: need to check if the class already exists. (and if so, what to do about it?)
-                TempClassInfo tempClassInfo = new TempClassInfo(dexFilePath, classDefItem);
+                UnresolvedClassInfo unresolvedClassInfo = new UnresolvedClassInfo(dexFilePath, classDefItem);
 
-                tempClasses.put(tempClassInfo.classType, tempClassInfo);
+                if (!unloadedClasses.containsKey(unresolvedClassInfo.classType)) {
+                    unloadedClasses.put(unresolvedClassInfo.classType, unresolvedClassInfo);
+                }
             } catch (Exception ex) {
                 throw ExceptionWithContext.withContext(ex, String.format("Error while loading class %s",
                         classDefItem.getClassType().getTypeDescriptor()));
@@ -251,42 +233,33 @@ public class ClassPath {
         }
     }
 
-    private static class ClassNotFoundException extends ExceptionWithContext {
-        public ClassNotFoundException(String message) {
-            super(message);
-        }
-    }
-
-    public static ClassDef getClassDef(String classType) {
-        return getClassDef(classType, true);
-    }
-
     /**
-     * This method checks if the given class has been loaded yet. If it has, it returns the loaded ClassDef. If not,
-     * then it looks up the TempClassItem for the given class and (possibly recursively) loads the ClassDef.
+     * This method loads the given class (and any dependent classes, as needed), removing them from unloadedClasses
      * @param classType the class to load
-     * @return the existing or newly loaded ClassDef object for the given class, or null if the class cannot be found
+     * @return the newly loaded ClassDef object for the given class, or null if the class cannot be found
      */
+    @Nullable
     private static ClassDef loadClassDef(String classType) {
-        ClassDef classDef = getClassDef(classType, false);
+        ClassDef classDef = null;
 
-        if (classDef == null) {
-            TempClassInfo classInfo = theClassPath.tempClasses.get(classType);
-            if (classInfo == null) {
-                return null;
-            }
-
-            try {
-                classDef = new ClassDef(classInfo);
-                theClassPath.classDefs.put(classDef.classType, classDef);
-            } catch (Exception ex) {
-                throw ExceptionWithContext.withContext(ex, String.format("Error while loading class %s from file %s",
-                        classInfo.classType, classInfo.dexFilePath));
-            }
+        UnresolvedClassInfo classInfo = theClassPath.unloadedClasses.get(classType);
+        if (classInfo == null) {
+            return null;
         }
+
+        try {
+            classDef = new ClassDef(classInfo);
+            theClassPath.classDefs.put(classDef.classType, classDef);
+        } catch (Exception ex) {
+            throw ExceptionWithContext.withContext(ex, String.format("Error while loading class %s from file %s",
+                    classInfo.classType, classInfo.dexFilePath));
+        }
+        theClassPath.unloadedClasses.remove(classType);
+
         return classDef;
     }
 
+    @Nonnull
     public static ClassDef getClassDef(String classType, boolean createUnresolvedClassDef)  {
         ClassDef classDef = theClassPath.classDefs.get(classType);
         if (classDef == null) {
@@ -294,15 +267,29 @@ public class ClassPath {
             if (classType.charAt(0) == '[') {
                 return theClassPath.createArrayClassDef(classType);
             } else {
-                if (createUnresolvedClassDef) {
-                    //TODO: we should output a warning
-                    return theClassPath.createUnresolvedClassDef(classType);
-                } else {
-                    return null;
+                try {
+                    classDef = loadClassDef(classType);
+                    if (classDef == null) {
+                        throw new ExceptionWithContext(
+                                String.format("Could not find definition for class %s", classType));
+                    }
+                } catch (Exception ex) {
+                    RuntimeException exWithContext = ExceptionWithContext.withContext(ex,
+                            String.format("Error while loading ClassPath class %s", classType));
+                    if (createUnresolvedClassDef) {
+                        //TODO: add warning message
+                        return theClassPath.createUnresolvedClassDef(classType);
+                    } else {
+                        throw exWithContext;
+                    }
                 }
             }
         }
         return classDef;
+    }
+
+    public static ClassDef getClassDef(String classType) {
+        return getClassDef(classType, true);
     }
 
     public static ClassDef getClassDef(TypeIdItem classType) {
@@ -319,6 +306,14 @@ public class ClassPath {
         "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[";
     private static ClassDef getArrayClassDefByElementClassAndDimension(ClassDef classDef, int arrayDimension) {
         return getClassDef(arrayPrefix.substring(256 - arrayDimension) + classDef.classType);
+    }
+
+    private static ClassDef unresolvedObjectClassDef = null;
+    public static ClassDef getUnresolvedObjectClassDef() {
+        if (unresolvedObjectClassDef == null) {
+            unresolvedObjectClassDef = new UnresolvedClassDef("Ljava/lang/Object;");
+        }
+        return unresolvedObjectClassDef;
     }
 
     private ClassDef createUnresolvedClassDef(String classType)  {
@@ -418,7 +413,13 @@ public class ClassPath {
         //if the two arrays have the same number of dimensions, then we should return an array class with the
         //same number of dimensions, for the common superclass of the 2 element classes
         if (class1.arrayDimensions == class2.arrayDimensions) {
-            ClassDef commonElementClass = getCommonSuperclass(class1.elementClass, class2.elementClass);
+            ClassDef commonElementClass;
+            if (class1.elementClass instanceof UnresolvedClassDef ||
+                class2.elementClass instanceof UnresolvedClassDef) {
+                commonElementClass = ClassPath.getUnresolvedObjectClassDef();
+            } else {
+                commonElementClass = getCommonSuperclass(class1.elementClass, class2.elementClass);
+            }
             return getArrayClassDefByElementClassAndDimension(commonElementClass, class1.arrayDimensions);
         }
 
@@ -448,7 +449,7 @@ public class ClassPath {
 
             try {
                 elementClass = ClassPath.getClassDef(arrayClassType.substring(i));
-            } catch (ClassNotFoundException ex) {
+            } catch (Exception ex) {
                 throw ExceptionWithContext.withContext(ex, "Error while creating array class " + arrayClassType);
             }
             arrayDimensions = i;
@@ -536,7 +537,7 @@ public class ClassPath {
         }
 
         public ClassDef getSuperclass() {
-            throw unresolvedValidationException();
+            return theClassPath.javaLangObjectClassDef;
         }
 
         public int getClassDepth() {
@@ -592,8 +593,17 @@ public class ClassPath {
 
         private final int classDepth;
 
-        private final String[] vtable;
-        private final HashMap<String, Integer> virtualMethodLookup;
+        // classes can only be public or package-private. Internally, any private/protected inner class is actually
+        // package-private.
+        private final boolean isPublic;
+
+        private final VirtualMethod[] vtable;
+
+        //this maps a method name of the form method(III)Ljava/lang/String; to an integer
+        //If the value is non-negative, it is a vtable index
+        //If it is -1, it is a non-static direct method,
+        //If it is -2, it is a static method
+        private final HashMap<String, Integer> methodLookup;
 
         private final SparseArray<FieldDef> instanceFields;
 
@@ -601,6 +611,8 @@ public class ClassPath {
         public final static int PrimitiveClassDef = 1;
         public final static int UnresolvedClassDef = 2;
 
+        private final static int DirectMethod = -1;
+        private final static int StaticMethod = -2;
 
         /**
          * The following fields are used only during the initial loading of classes, and are set to null afterwards
@@ -608,7 +620,7 @@ public class ClassPath {
          */
 
         //This is only the virtual methods that this class declares itself.
-        private String[] virtualMethods;
+        private VirtualMethod[] virtualMethods;
         //this is a list of all the interfaces that the class implements directory, or any super interfaces of those
         //interfaces. It is generated in such a way that it is ordered in the same way as dalvik's ClassObject.iftable,
         private LinkedHashMap<String, ClassDef> interfaceTable;
@@ -627,9 +639,10 @@ public class ClassPath {
                 implementedInterfaces.add(ClassPath.getClassDef("Ljava/lang/Cloneable;"));
                 implementedInterfaces.add(ClassPath.getClassDef("Ljava/io/Serializable;"));
                 isInterface = false;
+                isPublic = true;
 
                 vtable = superclass.vtable;
-                virtualMethodLookup = superclass.virtualMethodLookup;
+                methodLookup = superclass.methodLookup;
 
                 instanceFields = superclass.instanceFields;
                 classDepth = 1; //1 off from java.lang.Object
@@ -644,8 +657,9 @@ public class ClassPath {
                 this.superclass = null;
                 implementedInterfaces = null;
                 isInterface = false;
+                isPublic = true;
                 vtable = null;
-                virtualMethodLookup = null;
+                methodLookup = null;
                 instanceFields = null;
                 classDepth = 0; //TODO: maybe use -1 to indicate not applicable?
 
@@ -654,12 +668,13 @@ public class ClassPath {
             } else /*if (classFlavor == UnresolvedClassDef)*/ {
                 assert classType.charAt(0) == 'L';
                 this.classType = classType;
-                this.superclass = ClassPath.theClassPath.javaLangObjectClassDef;
+                this.superclass = ClassPath.getClassDef("Ljava/lang/Object;");
                 implementedInterfaces = new TreeSet<ClassDef>();
                 isInterface = false;
+                isPublic = true;
 
                 vtable = superclass.vtable;
-                virtualMethodLookup = superclass.virtualMethodLookup;
+                methodLookup = superclass.methodLookup;
 
                 instanceFields = superclass.instanceFields;
                 classDepth = 1; //1 off from java.lang.Object
@@ -669,8 +684,9 @@ public class ClassPath {
             }
         }
 
-        protected ClassDef(TempClassInfo classInfo)  {
+        protected ClassDef(UnresolvedClassInfo classInfo)  {
             classType = classInfo.classType;
+            isPublic = classInfo.isPublic;
             isInterface = classInfo.isInterface;
 
             superclass = loadSuperclass(classInfo);
@@ -686,9 +702,23 @@ public class ClassPath {
             interfaceTable = loadInterfaceTable(classInfo);
             virtualMethods = classInfo.virtualMethods;
             vtable = loadVtable(classInfo);
-            virtualMethodLookup = new HashMap<String, Integer>((int)Math.ceil(vtable.length / .7f), .75f);
+
+            int directMethodCount = 0;
+            if (classInfo.directMethods != null) {
+                directMethodCount = classInfo.directMethods.length;
+            }
+            methodLookup = new HashMap<String, Integer>((int)Math.ceil(((vtable.length + directMethodCount)/ .7f)), .75f);
             for (int i=0; i<vtable.length; i++) {
-                virtualMethodLookup.put(vtable[i], i);
+                methodLookup.put(vtable[i].method, i);
+            }
+            if (directMethodCount > 0) {
+                for (int i=0; i<classInfo.directMethods.length; i++) {
+                    if (classInfo.staticMethods[i]) {
+                        methodLookup.put(classInfo.directMethods[i], StaticMethod);
+                    } else {
+                        methodLookup.put(classInfo.directMethods[i], DirectMethod);
+                    }
+                }
             }
 
             instanceFields = loadFields(classInfo);
@@ -708,6 +738,10 @@ public class ClassPath {
 
         public boolean isInterface() {
             return this.isInterface;
+        }
+
+        public boolean isPublic() {
+            return this.isPublic;
         }
 
         public boolean extendsClass(ClassDef superclassDef) {
@@ -745,7 +779,28 @@ public class ClassPath {
         }
 
         public boolean hasVirtualMethod(String method) {
-            return virtualMethodLookup.containsKey(method);
+            Integer val = methodLookup.get(method);
+            if (val == null || val < 0) {
+                return false;
+            }
+            return true;
+        }
+
+        public int getMethodType(String method) {
+            Integer val = methodLookup.get(method);
+            if (val == null) {
+                return -1;
+            }
+            if (val >= 0) {
+                return DeodexUtil.Virtual;
+            }
+            if (val == DirectMethod) {
+                return DeodexUtil.Direct;
+            }
+            if (val == StaticMethod) {
+                return DeodexUtil.Static;
+            }
+            throw new RuntimeException("Unexpected method type");
         }
 
         public FieldDef getInstanceField(int fieldOffset) {
@@ -756,7 +811,7 @@ public class ClassPath {
             if (vtableIndex < 0 || vtableIndex >= vtable.length) {
                 return null;
             }
-            return this.vtable[vtableIndex];
+            return this.vtable[vtableIndex].method;
         }
 
         private void swap(byte[] fieldTypes, FieldDef[] fields, int position1, int position2) {
@@ -769,7 +824,7 @@ public class ClassPath {
             fields[position2] = tempField;
         }
 
-        private ClassDef loadSuperclass(TempClassInfo classInfo) {
+        private ClassDef loadSuperclass(UnresolvedClassInfo classInfo) {
             if (classInfo.classType.equals("Ljava/lang/Object;")) {
                 if (classInfo.superclassType != null) {
                     throw new ExceptionWithContext("Invalid superclass " +
@@ -783,9 +838,12 @@ public class ClassPath {
                     throw new ExceptionWithContext(classInfo.classType + " has no superclass");
                 }
 
-                ClassDef superclass = ClassPath.loadClassDef(superclassType);
-                if (superclass == null) {
-                    throw new ClassNotFoundException(String.format("Could not find superclass %s", superclassType));
+                ClassDef superclass;
+                try {
+                    superclass = ClassPath.getClassDef(superclassType);
+                } catch (Exception ex) {
+                    throw ExceptionWithContext.withContext(ex,
+                            String.format("Could not find superclass %s", superclassType));
                 }
 
                 if (!isInterface && superclass.isInterface) {
@@ -802,7 +860,7 @@ public class ClassPath {
             }
         }
 
-        private TreeSet<ClassDef> loadAllImplementedInterfaces(TempClassInfo classInfo) {
+        private TreeSet<ClassDef> loadAllImplementedInterfaces(UnresolvedClassInfo classInfo) {
             assert classType != null;
             assert classType.equals("Ljava/lang/Object;") || superclass != null;
             assert classInfo != null;
@@ -818,9 +876,12 @@ public class ClassPath {
 
             if (classInfo.interfaces != null) {
                 for (String interfaceType: classInfo.interfaces) {
-                    ClassDef interfaceDef = ClassPath.loadClassDef(interfaceType);
-                    if (interfaceDef == null) {
-                        throw new ClassNotFoundException(String.format("Could not find interface %s", interfaceType));
+                    ClassDef interfaceDef;
+                    try {
+                        interfaceDef = ClassPath.getClassDef(interfaceType);
+                    } catch (Exception ex) {
+                        throw ExceptionWithContext.withContext(ex,
+                                String.format("Could not find interface %s", interfaceType));
                     }
                     assert interfaceDef.isInterface();
                     implementedInterfaceSet.add(interfaceDef);
@@ -837,7 +898,7 @@ public class ClassPath {
             return implementedInterfaceSet;
         }
 
-        private LinkedHashMap<String, ClassDef> loadInterfaceTable(TempClassInfo classInfo) {
+        private LinkedHashMap<String, ClassDef> loadInterfaceTable(UnresolvedClassInfo classInfo) {
             if (classInfo.interfaces == null) {
                 return null;
             }
@@ -846,9 +907,12 @@ public class ClassPath {
 
             for (String interfaceType: classInfo.interfaces) {
                 if (!interfaceTable.containsKey(interfaceType)) {
-                    ClassDef interfaceDef = ClassPath.loadClassDef(interfaceType);
-                    if (interfaceDef == null) {
-                        throw new ClassNotFoundException(String.format("Could not find interface %s", interfaceType));
+                    ClassDef interfaceDef;
+                    try {
+                        interfaceDef = ClassPath.getClassDef(interfaceType);
+                    } catch (Exception ex) {
+                        throw ExceptionWithContext.withContext(ex,
+                                String.format("Could not find interface %s", interfaceType));
                     }
                     interfaceTable.put(interfaceType, interfaceDef);
 
@@ -865,19 +929,16 @@ public class ClassPath {
             return interfaceTable;
         }
 
-        private String[] loadVtable(TempClassInfo classInfo) {
+        //TODO: check the case when we have a package private method that overrides an interface method
+        private VirtualMethod[] loadVtable(UnresolvedClassInfo classInfo) {
             //TODO: it might be useful to keep track of which class's implementation is used for each virtual method. In other words, associate the implementing class type with each vtable entry
-            List<String> virtualMethodList = new LinkedList<String>();
-            //use a temp hash table, so that we can construct the final lookup with an appropriate
-            //capacity, based on the number of virtual methods
-            HashMap<String, Integer> tempVirtualMethodLookup = new HashMap<String, Integer>();
+            List<VirtualMethod> virtualMethodList = new LinkedList<VirtualMethod>();
 
             //copy the virtual methods from the superclass
             int methodIndex = 0;
             if (superclass != null) {
-                for (String method: superclass.vtable) {
-                    virtualMethodList.add(method);
-                    tempVirtualMethodLookup.put(method, methodIndex++);
+                for (int i=0; i<superclass.vtable.length; i++) {
+                    virtualMethodList.add(superclass.vtable[i]);
                 }
 
                 assert superclass.instanceFields != null;
@@ -888,12 +949,7 @@ public class ClassPath {
             //method (i.e. if it was implemented by the superclass)
             if (!this.isInterface) {
                 if (classInfo.virtualMethods != null) {
-                    for (String virtualMethod: classInfo.virtualMethods) {
-                        if (tempVirtualMethodLookup.get(virtualMethod) == null) {
-                            virtualMethodList.add(virtualMethod);
-                            tempVirtualMethodLookup.put(virtualMethod, methodIndex++);
-                        }
-                    }
+                    addToVtable(classInfo.virtualMethods, virtualMethodList);
                 }
 
                 if (interfaceTable != null) {
@@ -902,22 +958,54 @@ public class ClassPath {
                             continue;
                         }
 
-                        for (String virtualMethod: interfaceDef.virtualMethods) {
-                            if (tempVirtualMethodLookup.get(virtualMethod) == null) {
-                                virtualMethodList.add(virtualMethod);
-                                tempVirtualMethodLookup.put(virtualMethod, methodIndex++);
-                            }
-                        }
+                        addToVtable(interfaceDef.virtualMethods, virtualMethodList);
                     }
                 }
             }
 
-            String[] vtable = new String[virtualMethodList.size()];
+            VirtualMethod[] vtable = new VirtualMethod[virtualMethodList.size()];
             for (int i=0; i<virtualMethodList.size(); i++) {
                 vtable[i] = virtualMethodList.get(i);
             }
 
             return vtable;
+        }
+
+        private void addToVtable(VirtualMethod[] localMethods, List<VirtualMethod> vtable) {
+            for (VirtualMethod virtualMethod: localMethods) {
+                boolean found = false;
+                for (int i=0; i<vtable.size(); i++) {
+                    VirtualMethod superMethod = vtable.get(i);
+                    if (superMethod.method.equals(virtualMethod.method)) {
+                        if (!ClassPath.theClassPath.checkPackagePrivateAccess || this.canAccess(superMethod)) {
+                            found = true;
+                            vtable.set(i, virtualMethod);
+                            break;
+                        }
+                    }
+                }
+                if (!found) {
+                    vtable.add(virtualMethod);
+                }
+            }
+        }
+
+        private boolean canAccess(VirtualMethod virtualMethod) {
+            if (!virtualMethod.isPackagePrivate) {
+                return true;
+            }
+
+            String otherPackage = getPackage(virtualMethod.containingClass);
+            String ourPackage = getPackage(this.classType);
+            return otherPackage.equals(ourPackage);
+        }
+
+        private String getPackage(String classType) {
+            int lastSlash = classType.lastIndexOf('/');
+            if (lastSlash < 0) {
+                return "";
+            }
+            return classType.substring(1, lastSlash);
         }
 
         private int getNextFieldOffset() {
@@ -938,7 +1026,7 @@ public class ClassPath {
             }
         }
 
-        private SparseArray<FieldDef> loadFields(TempClassInfo classInfo) {
+        private SparseArray<FieldDef> loadFields(UnresolvedClassInfo classInfo) {
             //This is a bit of an "involved" operation. We need to follow the same algorithm that dalvik uses to
             //arrange fields, so that we end up with the same field offsets (which is needed for deodexing).
             //See mydroid/dalvik/vm/oo/Class.c - computeFieldOffsets()
@@ -1131,24 +1219,34 @@ public class ClassPath {
         }
     }
 
+    private static class VirtualMethod {
+        public String containingClass;
+        public String method;
+        public boolean isPackagePrivate;
+    }
+
     /**
-     * In some cases, classes can reference another class (i.e. a superclass or an interface) that is in a *later*
-     * boot class path entry. So we load all classes from all boot class path entries before starting to process them
+     * This aggregates the basic information about a class in an easy-to-use format, without requiring references
+     * to any other class.
      */
-    private static class TempClassInfo {
+    private static class UnresolvedClassInfo {
         public final String dexFilePath;
         public final String classType;
+        public final boolean isPublic;
         public final boolean isInterface;
         public final String superclassType;
         public final String[] interfaces;
-        public final String[] virtualMethods;
+        public final boolean[] staticMethods;
+        public final String[] directMethods;
+        public final VirtualMethod[] virtualMethods;
         public final String[][] instanceFields;
 
-        public TempClassInfo(String dexFilePath, ClassDefItem classDefItem) {
+        public UnresolvedClassInfo(String dexFilePath, ClassDefItem classDefItem) {
             this.dexFilePath = dexFilePath;
 
             classType = classDefItem.getClassType().getTypeDescriptor();
 
+            isPublic = (classDefItem.getAccessFlags() & AccessFlags.PUBLIC.getValue()) != 0;
             isInterface = (classDefItem.getAccessFlags() & AccessFlags.INTERFACE.getValue()) != 0;
 
             TypeIdItem superclassType = classDefItem.getSuperclass();
@@ -1162,9 +1260,14 @@ public class ClassPath {
 
             ClassDataItem classDataItem = classDefItem.getClassData();
             if (classDataItem != null) {
+                boolean[][] _staticMethods = new boolean[1][];
+                directMethods = loadDirectMethods(classDataItem, _staticMethods);
+                staticMethods = _staticMethods[0];
                 virtualMethods = loadVirtualMethods(classDataItem);
                 instanceFields = loadInstanceFields(classDataItem);
             } else {
+                staticMethods = null;
+                directMethods = null;
                 virtualMethods = null;
                 instanceFields = null;
             }
@@ -1185,24 +1288,55 @@ public class ClassPath {
             return null;
         }
 
-        private String[] loadVirtualMethods(ClassDataItem classDataItem) {
-            EncodedMethod[] encodedMethods = classDataItem.getVirtualMethods();
-            if (encodedMethods != null && encodedMethods.length > 0) {
-                String[] virtualMethods = new String[encodedMethods.length];
-                for (int i=0; i<encodedMethods.length; i++) {
-                    virtualMethods[i] = encodedMethods[i].method.getVirtualMethodString();
+        private String[] loadDirectMethods(ClassDataItem classDataItem, boolean[][] _staticMethods) {
+            List<EncodedMethod> encodedMethods = classDataItem.getDirectMethods();
+            if (encodedMethods.size() > 0) {
+                boolean[] staticMethods = new boolean[encodedMethods.size()];
+                String[] directMethods = new String[encodedMethods.size()];
+
+                for (int i=0; i<encodedMethods.size(); i++) {
+                    EncodedMethod encodedMethod = encodedMethods.get(i);
+
+                    if ((encodedMethod.accessFlags & AccessFlags.STATIC.getValue()) != 0) {
+                        staticMethods[i] = true;
+                    }
+                    directMethods[i] = encodedMethod.method.getShortMethodString();
+                }
+                _staticMethods[0] = staticMethods;
+                return directMethods;
+            }
+            return null;
+        }
+
+        private VirtualMethod[] loadVirtualMethods(ClassDataItem classDataItem) {
+            List<EncodedMethod> encodedMethods = classDataItem.getVirtualMethods();
+            if (encodedMethods.size() > 0) {
+                VirtualMethod[] virtualMethods = new VirtualMethod[encodedMethods.size()];
+                for (int i=0; i<encodedMethods.size(); i++) {
+                    virtualMethods[i] = new VirtualMethod();
+                    EncodedMethod encodedMethod = encodedMethods.get(i);
+
+                    virtualMethods[i].isPackagePrivate = methodIsPackagePrivate(encodedMethod.accessFlags);
+                    virtualMethods[i].containingClass = classDataItem.getParentType().getTypeDescriptor();
+                    virtualMethods[i].method = encodedMethods.get(i).method.getShortMethodString();
                 }
                 return virtualMethods;
             }
             return null;
         }
 
+        private static boolean methodIsPackagePrivate(int accessFlags) {
+            return (accessFlags & (AccessFlags.PRIVATE.getValue() |
+                                   AccessFlags.PROTECTED.getValue() |
+                                   AccessFlags.PUBLIC.getValue())) == 0;
+        }
+
         private String[][] loadInstanceFields(ClassDataItem classDataItem) {
-            EncodedField[] encodedFields = classDataItem.getInstanceFields();
-            if (encodedFields != null && encodedFields.length > 0) {
-                String[][] instanceFields = new String[encodedFields.length][2];
-                for (int i=0; i<encodedFields.length; i++) {
-                    EncodedField encodedField = encodedFields[i];
+            List<EncodedField> encodedFields = classDataItem.getInstanceFields();
+            if (encodedFields.size() > 0) {
+                String[][] instanceFields = new String[encodedFields.size()][2];
+                for (int i=0; i<encodedFields.size(); i++) {
+                    EncodedField encodedField = encodedFields.get(i);
                     instanceFields[i][0] = encodedField.field.getFieldName().getStringValue();
                     instanceFields[i][1] = encodedField.field.getFieldType().getTypeDescriptor();
                 }

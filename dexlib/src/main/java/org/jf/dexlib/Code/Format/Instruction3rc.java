@@ -41,7 +41,8 @@ import org.jf.dexlib.Util.NumberUtils;
 
 import static org.jf.dexlib.Code.Opcode.*;
 
-public class Instruction3rc extends InstructionWithReference implements RegisterRangeInstruction {
+public class Instruction3rc extends InstructionWithReference implements RegisterRangeInstruction,
+        InstructionWithJumboVariant {
     public static final Instruction.InstructionFactory Factory = new Factory();
     private byte regCount;
     private short startReg;
@@ -79,6 +80,15 @@ public class Instruction3rc extends InstructionWithReference implements Register
     }
 
     protected void writeInstruction(AnnotatedOutput out, int currentCodeAddress) {
+        if(getReferencedItem().getIndex() > 0xFFFF) {
+            if (opcode.hasJumboOpcode()) {
+                throw new RuntimeException(String.format("%s index is too large. Use the %s instruction instead.",
+                        opcode.referenceType.name(), opcode.getJumboOpcode().name));
+            } else {
+                throw new RuntimeException(String.format("%s index is too large.", opcode.referenceType.name()));
+            }
+        }
+
         out.writeByte(opcode.value);
         out.writeByte(regCount);
         out.writeShort(this.getReferencedItem().getIndex());
@@ -89,7 +99,7 @@ public class Instruction3rc extends InstructionWithReference implements Register
         return Format.Format3rc;
     }
 
-    public short getRegCount() {
+    public int getRegCount() {
         return (short)(regCount & 0xFF);
     }
 
@@ -107,7 +117,8 @@ public class Instruction3rc extends InstructionWithReference implements Register
             if (type.charAt(1) == 'J' || type.charAt(1) == 'D') {
                 throw new RuntimeException("The type cannot be an array of longs or doubles");
             }
-        } else if (opcode.value >= INVOKE_VIRTUAL_RANGE.value && opcode.value <= INVOKE_INTERFACE_RANGE.value) {
+        } else if (opcode.value >= INVOKE_VIRTUAL_RANGE.value && opcode.value <= INVOKE_INTERFACE_RANGE.value ||
+                opcode == INVOKE_OBJECT_INIT_RANGE) {
             //check data for invoke-*/range opcodes
             MethodIdItem methodIdItem = (MethodIdItem) item;
             int parameterRegisterCount = methodIdItem.getPrototype().getParameterRegisterCount();
@@ -118,6 +129,15 @@ public class Instruction3rc extends InstructionWithReference implements Register
                 throw new RuntimeException("regCount does not match the number of arguments of the method");
             }
         }
+    }
+
+    public Instruction makeJumbo() {
+        Opcode jumboOpcode = opcode.getJumboOpcode();
+        if (jumboOpcode == null) {
+            return null;
+        }
+
+        return new Instruction5rc(jumboOpcode, getRegCount(), getStartRegister(), getReferencedItem());
     }
 
     private static class Factory implements Instruction.InstructionFactory {
