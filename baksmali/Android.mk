@@ -31,7 +31,7 @@ intermediates := $(call local-intermediates-dir,COMMON)
 
 LOCAL_SRC_FILES := \
 	$(call all-java-files-under, src/main/java) \
-	$(call all-java-files-under, ../dexlib/src/main/java) \
+	$(call all-java-files-under, ../dexlib2/src/main/java) \
 	$(call all-java-files-under, ../util/src/main/java)
 
 LOCAL_JAR_MANIFEST := manifest.txt
@@ -42,7 +42,10 @@ LOCAL_STATIC_JAVA_LIBRARIES := \
 	guavalib
 
 #read in the version number
-BAKSMALI_VERSION := $(shell cat $(LOCAL_PATH)/../version)
+BAKSMALI_VERSION := $(shell cat $(LOCAL_PATH)/../build.gradle | \
+    grep -o -e "^version = '\(.*\)'" | grep -o -e "[0-9.]\+")
+
+BAKSMALI_VERSION := $(BAKSMALI_VERSION)-aosp
 
 #create a new baksmali.properties file using the correct version
 $(intermediates)/resources/baksmali.properties:

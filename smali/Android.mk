@@ -34,21 +34,9 @@ GEN := $(addprefix $(intermediates)/, \
 			smaliTreeWalker.java \
         )
 
-ANTLR_JAR = $(call java-lib-deps,antlr,true)
-
-$(intermediates)/smaliTreeWalker.java: $(intermediates)/smaliParser.java
-
-$(GEN): $(ANTLR_JAR)
-$(GEN): PRIVATE_PATH := $(LOCAL_PATH)
-$(GEN): PRIVATE_CUSTOM_TOOL = java -jar $(ANTLR_JAR) -fo $(dir $@) $<
-$(GEN): $(intermediates)/%.java :  $(LOCAL_PATH)/src/main/antlr3/%.g
-	$(transform-generated-source)
-
-LOCAL_GENERATED_SOURCES += $(GEN)
-
 LOCAL_SRC_FILES := \
 	$(call all-java-files-under, src/main/java) \
-	$(call all-java-files-under, ../dexlib/src/main/java) \
+	$(call all-java-files-under, ../dexlib2/src/main/java) \
 	$(call all-java-files-under, ../util/src/main/java)
 
 LOCAL_JAR_MANIFEST := manifest.txt
@@ -60,7 +48,10 @@ LOCAL_STATIC_JAVA_LIBRARIES := \
 	jsr305lib
 
 #read in the version number
-SMALI_VERSION := $(shell cat $(LOCAL_PATH)/../version)
+SMALI_VERSION := $(shell cat $(LOCAL_PATH)/../build.gradle | \
+    grep -o -e "^version = '\(.*\)'" | grep -o -e "[0-9.]\+")
+
+SMALI_VERSION := $(SMALI_VERSION)-aosp
 
 #create a new smali.properties file using the correct version
 $(intermediates)/resources/smali.properties:

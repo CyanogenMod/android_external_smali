@@ -158,9 +158,8 @@ public class BuilderClassPool implements ClassSection<BuilderStringReference, Bu
         if (lastIndex > -1) {
             return new AbstractCollection<BuilderEncodedValue>() {
                 @Nonnull @Override public Iterator<BuilderEncodedValue> iterator() {
-                    return FluentIterable.from(sortedStaticFields)
-                            .limit(lastIndex+1)
-                            .transform(GET_INITIAL_VALUE).iterator();
+                    Iterable<BuilderField> fields = Iterables.limit(sortedStaticFields, lastIndex + 1);
+                    return Iterables.transform(fields, GET_INITIAL_VALUE).iterator();
                 }
 
                 @Override public int size() {
@@ -254,8 +253,7 @@ public class BuilderClassPool implements ClassSection<BuilderStringReference, Bu
         if (hasParameterAnnotations) {
             return new AbstractForwardSequentialList<BuilderAnnotationSet>() {
                 @Nonnull @Override public Iterator<BuilderAnnotationSet> iterator() {
-                    return FluentIterable.from(parameters)
-                            .transform(PARAMETER_ANNOTATIONS).iterator();
+                    return Iterables.transform(parameters, PARAMETER_ANNOTATIONS).iterator();
                 }
 
                 @Override public int size() {

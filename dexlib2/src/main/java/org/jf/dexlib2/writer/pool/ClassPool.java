@@ -285,9 +285,8 @@ public class ClassPool implements ClassSection<CharSequence, CharSequence,
         if (lastIndex > -1) {
             return new AbstractCollection<EncodedValue>() {
                 @Nonnull @Override public Iterator<EncodedValue> iterator() {
-                    return FluentIterable.from(sortedStaticFields)
-                            .limit(lastIndex+1)
-                            .transform(GET_INITIAL_VALUE).iterator();
+                    Iterable<Field> fields = Iterables.limit(sortedStaticFields, lastIndex + 1);
+                    return Iterables.transform(fields, GET_INITIAL_VALUE).iterator();
                 }
 
                 @Override public int size() {
@@ -377,8 +376,7 @@ public class ClassPool implements ClassSection<CharSequence, CharSequence,
         if (hasParameterAnnotations) {
             return new AbstractForwardSequentialList<Set<? extends Annotation>>() {
                 @Nonnull @Override public Iterator<Set<? extends Annotation>> iterator() {
-                    return FluentIterable.from(parameters)
-                            .transform(PARAMETER_ANNOTATIONS).iterator();
+                    return Iterables.transform(parameters, PARAMETER_ANNOTATIONS).iterator();
                 }
 
                 @Override public int size() {

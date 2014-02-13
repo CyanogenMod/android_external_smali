@@ -34,7 +34,6 @@ package org.jf.dexlib2.analysis;
 import com.google.common.base.Predicates;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
-import com.google.common.collect.FluentIterable;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -194,7 +193,7 @@ public class ClassProto implements TypeProto {
     @Nonnull
     protected Iterable<ClassDef> getDirectInterfaces() {
         Iterable<ClassDef> directInterfaces =
-                FluentIterable.from(getInterfaces().values()).filter(Predicates.notNull());
+                Iterables.filter(getInterfaces().values(), Predicates.notNull());
 
         if (!interfacesFullyResolved) {
             throw new UnresolvedClassException("Interfaces for class %s not fully resolved", getType());
