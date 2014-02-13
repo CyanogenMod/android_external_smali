@@ -28,7 +28,7 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
- 
+
 configurations {
     antlr3
     jflex
@@ -66,24 +66,36 @@ idea {
 
 dependencies {
     compile project(':util')
-    compile project(':dexlib')
-    compile 'org.antlr:antlr-runtime:3.2'
-    compile 'commons-cli:commons-cli:1.2'
-    compile 'com.google.guava:guava:13.0.1'
+    compile project(':dexlib2')
+    compile depends.antlr_runtime
+    compile depends.commons_cli
 
-    testCompile 'junit:junit:4.6'
+    testCompile depends.junit
 
-    antlr3 'org.antlr:antlr:3.2'
-    jflex 'de.jflex:jflex:1.4.3'
-    proguard 'net.sf.proguard:proguard-base:4.8'
+    antlr3 depends.antlr
+    jflex depends.jflex
+    proguard depends.proguard
 }
 
-task generateAntlrSource(type: JavaExec) {
+task generateParserAntlrSource(type: JavaExec) {
     inputs.dir file(antlrSource)
     outputs.dir file(antlrOutput)
 
     mkdir(antlrOutput)
-    def grammars = fileTree(antlrSource).include('**/*.g')
+    def grammars = fileTree(antlrSource).include('**/smaliParser.g')
+
+    classpath = configurations.antlr3
+    main = 'org.antlr.Tool'
+    args '-fo', relativePath("${antlrOutput}/org/jf/smali")
+    args grammars.files
+}
+
+task generateTreeWalkerAntlrSource(type: JavaExec) {
+    inputs.dir file(antlrSource)
+    outputs.dir file(antlrOutput)
+
+    mkdir(antlrOutput)
+    def grammars = fileTree(antlrSource).include('**/smaliTreeWalker.g')
 
     classpath = configurations.antlr3
     main = 'org.antlr.Tool'
@@ -116,39 +128,73 @@ task generateJflexSource(type: JavaExec) {
     args '-q'
     args '-d', relativePath("${jflexOutput}/org/jf/smali")
     args grammars.files.join(' ')
+    environment LC_ALL: "en_US"
 }
 
-compileJava.dependsOn generateAntlrSource, generateJflexSource
+compileJava.dependsOn generateParserAntlrSource, generateTreeWalkerAntlrSource, generateJflexSource
 compileTestJava.dependsOn generateTestAntlrSource
 
-// build a jar containing all dependencies
+processResources.inputs.property('version', version)
+processResources.expand('version': version)
+
+// This is the jar that gets uploaded to maven
 jar {
+    baseName = 'maven'
+}
+
+// Build a separate jar that contains all dependencies
+task fatJar(type: Jar, dependsOn: jar) {
+    from sourceSets.main.output
     from { configurations.compile.collect { it.isDirectory() ? it : zipTree(it) } }
 
     manifest {
         attributes("Main-Class": "org.jf.smali.main")
     }
+
+    doLast {
+        if (!System.getProperty("os.name").toLowerCase().contains("windows")) {
+            ant.symlink(link: file("${destinationDir}/smali.jar"), resource: archivePath, overwrite: true)
+        }
+    }
+}
+tasks.getByPath('build').dependsOn(fatJar)
+
+uploadArchives {
+    repositories.mavenDeployer {
+        pom.project {
+            description 'smali is an assembler for dalvik bytecode'
+            scm {
+                url 'https://github.com/JesusFreke/smali/tree/master/smali'
+            }
+        }
+    }
 }
 
-processResources.inputs.property('version', version)
-processResources.expand('version': version)
+task sourcesJar(type: Jar) {
+    classifier = 'sources'
+    from sourceSets.main.allJava
+}
 
-task proguard(type: JavaExec, dependsOn: jar) {
-    def outFile = jar.destinationDir.getPath() + '/' + jar.baseName + '-' + jar.version + '-small' + '.' + jar.extension
-    inputs.file jar.archivePath
+artifacts {
+    archives sourcesJar
+}
+
+task proguard(type: JavaExec, dependsOn: fatJar) {
+    def outFile = fatJar.destinationDir.getPath() + '/' + fatJar.baseName + '-' + fatJar.version + '-small' + '.' + fatJar.extension
+    inputs.file fatJar.archivePath
     outputs.file outFile
 
     classpath = configurations.proguard
     main = 'proguard.ProGuard'
-    args "-injars ${jar.archivePath}(!**/TestStringTemplate*.class)"
+    args "-injars ${fatJar.archivePath}(!**/TestStringTemplate*.class)"
     args "-outjars ${outFile}"
     args "-libraryjars ${System.properties['java.home']}/lib/rt.jar"
     args '-dontobfuscate'
     args '-dontoptimize'
     args '-keep public class org.jf.smali.main { public static void main(java.lang.String[]); }'
     args '-keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }'
-    args '-dontwarn com.google.common.base.**'
-    args '-dontnote com.google.common.base.**'
+    args '-dontwarn com.google.common.**'
+    args '-dontnote com.google.common.**'
 }
 
 tasks.getByPath(':release').dependsOn(proguard)

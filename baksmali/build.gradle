@@ -28,48 +28,83 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
- 
+
 configurations {
     proguard
 }
 
 dependencies {
     compile project(':util')
-    compile project(':dexlib')
-    compile 'commons-cli:commons-cli:1.2'
-    compile 'com.google.code.findbugs:jsr305:1.3.9'
+    compile project(':dexlib2')
+    compile depends.commons_cli
+    compile depends.guava
 
-    proguard 'net.sf.proguard:proguard-base:4.8'
+    testCompile depends.junit
+
+    proguard depends.proguard
 }
 
 processResources.inputs.property('version', version)
 processResources.expand('version': version)
 
-// build a jar containing all dependencies
+// This is the jar that gets uploaded to maven
 jar {
+    baseName = 'maven'
+}
+
+// Build a separate jar that contains all dependencies
+task fatJar(type: Jar) {
+    from sourceSets.main.output
     from { configurations.compile.collect { it.isDirectory() ? it : zipTree(it) } }
 
     manifest {
         attributes("Main-Class": "org.jf.baksmali.main")
     }
+
+    doLast {
+        if (!System.getProperty("os.name").toLowerCase().contains("windows")) {
+            ant.symlink(link: file("${destinationDir}/baksmali.jar"), resource: archivePath, overwrite: true)
+        }
+    }
+}
+tasks.getByPath('build').dependsOn(fatJar)
+
+uploadArchives {
+    repositories.mavenDeployer {
+        pom.project {
+            description 'baksmali is a disassembler for dalvik bytecode'
+            scm {
+                url 'https://github.com/JesusFreke/smali/tree/master/baksmali'
+            }
+        }
+    }
 }
 
-task proguard(type: JavaExec, dependsOn: jar) {
-    def outFile = jar.destinationDir.getPath() + '/' + jar.baseName + '-' + jar.version + '-small' + '.' + jar.extension
-    inputs.file jar.archivePath
+task sourcesJar(type: Jar) {
+    classifier = 'sources'
+    from sourceSets.main.allJava
+}
+
+artifacts {
+    archives sourcesJar
+}
+
+task proguard(type: JavaExec, dependsOn: fatJar) {
+    def outFile = fatJar.destinationDir.getPath() + '/' + fatJar.baseName + '-' + fatJar.version + '-small' + '.' + fatJar.extension
+    inputs.file fatJar.archivePath
     outputs.file outFile
 
     classpath = configurations.proguard
     main = 'proguard.ProGuard'
-    args '-injars ' + jar.archivePath
+    args '-injars ' + fatJar.archivePath
     args '-outjars ' + outFile
     args '-libraryjars ' + System.properties['java.home'] + '/lib/rt.jar'
     args '-dontobfuscate'
     args '-dontoptimize'
     args '-keep public class org.jf.baksmali.main { public static void main(java.lang.String[]); }'
     args '-keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }'
-    args '-dontwarn com.google.common.base.**'
-    args '-dontnote com.google.common.base.**'
+    args '-dontwarn com.google.common.**'
+    args '-dontnote com.google.common.**'
 }
 
 tasks.getByPath(':release').dependsOn(proguard)
