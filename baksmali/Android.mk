@@ -31,15 +31,12 @@ intermediates := $(call local-intermediates-dir,COMMON)
 
 LOCAL_SRC_FILES := \
 	$(call all-java-files-under, src/main/java) \
-	$(call all-java-files-under, ../dexlib2/src/main/java) \
 	$(call all-java-files-under, ../util/src/main/java)
 
 LOCAL_JAR_MANIFEST := manifest.txt
 
 LOCAL_STATIC_JAVA_LIBRARIES := \
-	antlr-runtime \
-	commons-cli-1.2 \
-	guavalib
+	dexlib2
 
 #read in the version number
 BAKSMALI_VERSION := $(shell cat $(LOCAL_PATH)/../build.gradle | \
