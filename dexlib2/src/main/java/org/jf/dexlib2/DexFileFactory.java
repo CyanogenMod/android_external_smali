@@ -45,22 +45,26 @@ import java.util.zip.ZipFile;
 
 public final class DexFileFactory {
     @Nonnull
-    public static DexBackedDexFile loadDexFile(String path, int api) throws IOException {
-        return loadDexFile(new File(path), "classes.dex", new Opcodes(api));
+    public static DexBackedDexFile loadDexFile(String path, int api, boolean experimental)
+            throws IOException {
+        return loadDexFile(new File(path), "classes.dex", new Opcodes(api, experimental));
     }
 
     @Nonnull
-    public static DexBackedDexFile loadDexFile(File dexFile, int api) throws IOException {
-        return loadDexFile(dexFile, "classes.dex", new Opcodes(api));
+    public static DexBackedDexFile loadDexFile(File dexFile, int api, boolean experimental)
+            throws IOException {
+        return loadDexFile(dexFile, "classes.dex", new Opcodes(api, experimental));
     }
 
     @Nonnull
-    public static DexBackedDexFile loadDexFile(File dexFile, String dexEntry, int api) throws IOException {
-        return loadDexFile(dexFile, dexEntry, new Opcodes(api));
+    public static DexBackedDexFile loadDexFile(File dexFile, String dexEntry, int api,
+            boolean experimental) throws IOException {
+        return loadDexFile(dexFile, dexEntry, new Opcodes(api, experimental));
     }
 
     @Nonnull
-    public static DexBackedDexFile loadDexFile(File dexFile, String dexEntry, @Nonnull Opcodes opcodes) throws IOException {
+    public static DexBackedDexFile loadDexFile(File dexFile, String dexEntry,
+            @Nonnull Opcodes opcodes) throws IOException {
         ZipFile zipFile = null;
         boolean isZipFile = false;
         try {
@@ -98,19 +102,22 @@ public final class DexFileFactory {
         }
 
         InputStream inputStream = new BufferedInputStream(new FileInputStream(dexFile));
-
         try {
-            return DexBackedDexFile.fromInputStream(opcodes, inputStream);
-        } catch (DexBackedDexFile.NotADexFile ex) {
-            // just eat it
-        }
+            try {
+                return DexBackedDexFile.fromInputStream(opcodes, inputStream);
+            } catch (DexBackedDexFile.NotADexFile ex) {
+                // just eat it
+            }
 
-        // Note: DexBackedDexFile.fromInputStream will reset inputStream back to the same position, if it fails
+            // Note: DexBackedDexFile.fromInputStream will reset inputStream back to the same position, if it fails
 
-        try {
-            return DexBackedOdexFile.fromInputStream(opcodes, inputStream);
-        } catch (DexBackedOdexFile.NotAnOdexFile ex) {
-            // just eat it
+            try {
+                return DexBackedOdexFile.fromInputStream(opcodes, inputStream);
+            } catch (DexBackedOdexFile.NotAnOdexFile ex) {
+                // just eat it
+            }
+        } finally {
+            inputStream.close();
         }
 
         throw new ExceptionWithContext("%s is not an apk, dex file or odex file.", dexFile.getPath());
