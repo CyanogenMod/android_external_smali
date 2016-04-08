@@ -77,7 +77,7 @@ import java.util.*;
   public String classType;
   private boolean verboseErrors = false;
   private int apiLevel = 15;
-  private Opcodes opcodes = new Opcodes(apiLevel, false);
+  private Opcodes opcodes = Opcodes.forApi(apiLevel);
   private DexBuilder dexBuilder;
 
   public void setDexBuilder(DexBuilder dexBuilder) {
@@ -1219,20 +1219,20 @@ insn_sparse_switch_directive
       $method::methodBuilder.addInstruction(new BuilderSparseSwitchPayload($sparse_switch_elements.elements));
     };
 
+array_descriptor returns [String type]
+  : ARRAY_TYPE_PREFIX ( PRIMITIVE_TYPE { $type = $ARRAY_TYPE_PREFIX.text + $PRIMITIVE_TYPE.text; }
+                      | CLASS_DESCRIPTOR { $type = $ARRAY_TYPE_PREFIX.text + $CLASS_DESCRIPTOR.text; });
+
 nonvoid_type_descriptor returns [String type]
-  : (PRIMITIVE_TYPE
-  | CLASS_DESCRIPTOR
-  | ARRAY_DESCRIPTOR)
-  {
-    $type = $start.getText();
-  };
+  : (PRIMITIVE_TYPE { $type = $text; }
+  | CLASS_DESCRIPTOR { $type = $text; }
+  | array_descriptor { $type = $array_descriptor.type; })
+  ;
 
 reference_type_descriptor returns [String type]
-  : (CLASS_DESCRIPTOR
-  | ARRAY_DESCRIPTOR)
-  {
-    $type = $start.getText();
-  };
+  : (CLASS_DESCRIPTOR { $type = $text; }
+  | array_descriptor { $type = $array_descriptor.type; })
+  ;
 
 type_descriptor returns [String type]
   : VOID_TYPE {$type = "V";}
